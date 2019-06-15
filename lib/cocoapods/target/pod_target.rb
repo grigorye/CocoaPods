@@ -447,6 +447,10 @@ module Pod
       support_files_dir + "#{label}-prefix.pch"
     end
 
+    def info_plist_entries
+      spec_consumers.first.info_plist
+    end
+
     # @param  [String] bundle_name
     #         The name of the bundle product, which is given by the +spec+.
     #
