@@ -64,7 +64,7 @@ module Pod
                                   target.dependent_targets_for_app_spec(spec)
                                 end
             resource_paths = dependent_targets.flat_map do |dependent_target|
-              spec_paths_to_include = dependent_target.library_specs.map(&:name)
+              spec_paths_to_include = dependent_target.host_requires_frameworks ? [] : dependent_target.library_specs.map(&:name)
               spec_paths_to_include << spec.name if dependent_target == target
               dependent_target.resource_paths.values_at(*spec_paths_to_include).flatten.compact
             end.uniq
