@@ -593,7 +593,7 @@ module Pod
             pod_targets = target.dependent_targets_for_test_spec(test_spec)
             resource_paths_by_config = target.user_build_configurations.keys.each_with_object({}) do |config, resources_by_config|
               resources_by_config[config] = pod_targets.flat_map do |pod_target|
-                spec_paths_to_include = pod_target.library_specs.map(&:name)
+                spec_paths_to_include = pod_target.host_requires_frameworks ? [] : pod_target.library_specs.map(&:name)
                 spec_paths_to_include << test_spec.name if pod_target == target
                 pod_target.resource_paths.values_at(*spec_paths_to_include).flatten.compact
               end

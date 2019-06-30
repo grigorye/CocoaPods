@@ -58,20 +58,25 @@ module Pod
           def add_copy_resources_script_phase(native_target, spec)
             script_path = "${PODS_ROOT}/#{target.copy_resources_script_path_for_spec(spec).relative_path_from(target.sandbox.root)}"
 
+            dependent_targets = if spec.test_specification?
+                                  target.dependent_targets_for_test_spec(spec)
+                                else
+                                  target.dependent_targets_for_app_spec(spec)
+                                end
+            resource_paths = dependent_targets.flat_map do |dependent_target|
+              spec_paths_to_include = dependent_target.host_requires_frameworks ? [] : dependent_target.library_specs.map(&:name)
+              spec_paths_to_include << spec.name if dependent_target == target
+              dependent_target.resource_paths.values_at(*spec_paths_to_include).flatten.compact
+            end.uniq
+
+            if resource_paths.empty?
+              UserProjectIntegrator::TargetIntegrator.remove_copy_resources_script_phase_from_target(native_target)
+              return
+            end
+
             input_paths_by_config = {}
             output_paths_by_config = {}
             if use_input_output_paths
-              dependent_targets = if spec.test_specification?
-                                    target.dependent_targets_for_test_spec(spec)
-                                  else
-                                    target.dependent_targets_for_app_spec(spec)
-                                  end
-              resource_paths = dependent_targets.flat_map do |dependent_target|
-                spec_paths_to_include = dependent_target.library_specs.map(&:name)
-                spec_paths_to_include << spec.name if dependent_target == target
-                dependent_target.resource_paths.values_at(*spec_paths_to_include).flatten.compact
-              end.uniq
-
               unless resource_paths.empty?
                 input_file_list_path = target.copy_resources_script_input_files_path_for_spec(spec)
                 input_file_list_relative_path = "${PODS_ROOT}/#{input_file_list_path.relative_path_from(target.sandbox.root)}"
