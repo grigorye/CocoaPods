@@ -8,6 +8,10 @@ module Pod
         require 'cocoapods/target/aggregate_target.rb'
         require 'digest'
 
+        # @return [Sandbox] The sandbox where the Pods should be installed.
+        #
+        attr_reader :sandbox
+
         # @return [Symbol]
         #         The type of target. Either aggregate or pod target.
         #
@@ -20,10 +24,12 @@ module Pod
 
         # Initialize a new instance.
         #
+        # @param [Sandbox] sandbox see #sandbox
         # @param [Symbol] type @see #type
         # @param [Hash{String => Object}] key_hash @see #key_hash
         #
-        def initialize(type, key_hash)
+        def initialize(sandbox, type, key_hash)
+          @sandbox = sandbox
           @type = type
           @key_hash = key_hash
         end
@@ -46,6 +52,7 @@ module Pod
               return :project if other.key_hash['CHECKSUM'] != key_hash['CHECKSUM']
               return :project if other.key_hash['SPECS'] != key_hash['SPECS']
               return :project if other.key_hash['FILES'] != key_hash['FILES']
+              return :project if other.key_hash['PROJECT_NAME'] != key_hash['PROJECT_NAME']
             end
 
             this_build_settings = key_hash['BUILD_SETTINGS_CHECKSUM']
@@ -64,14 +71,23 @@ module Pod
           key_hash
         end
 
+        # @return [String]
+        #         The name of the project the target belongs to.
+        #
+        def project_name
+          key_hash['PROJECT_NAME']
+        end
+
         # Creates a TargetCacheKey instance from the given hash.
+        #
+        # @param [Sandbox] sandbox The sandbox to use to construct a TargetCacheKey object.
         #
         # @param [Hash{String => Object}] key_hash
         #        The hash used to construct a TargetCacheKey object.
         #
         # @return [TargetCacheKey]
         #
-        def self.from_cache_hash(key_hash)
+        def self.from_cache_hash(sandbox, key_hash)
           cache_hash = key_hash.dup
           if files = cache_hash['FILES']
             cache_hash['FILES'] = files.sort_by(&:downcase)
@@ -80,10 +96,12 @@ module Pod
             cache_hash['SPECS'] = specs.sort_by(&:downcase)
           end
           type = cache_hash['CHECKSUM'] ? :pod_target : :aggregate
-          TargetCacheKey.new(type, cache_hash)
+          TargetCacheKey.new(sandbox, type, cache_hash)
         end
 
         # Constructs a TargetCacheKey instance from a PodTarget.
+        #
+        # @param [Sandbox] sandbox The sandbox to use to construct a TargetCacheKey object.
         #
         # @param [PodTarget] pod_target
         #        The pod target used to construct a TargetCacheKey object.
@@ -96,40 +114,48 @@ module Pod
         #
         # @return [TargetCacheKey]
         #
-        def self.from_pod_target(pod_target, is_local_pod: false, checkout_options: nil)
+        def self.from_pod_target(sandbox, pod_target, is_local_pod: false, checkout_options: nil)
           build_settings = {}
-          build_settings[pod_target.label.to_s] = Digest::MD5.hexdigest(pod_target.build_settings.xcconfig.to_s)
-          pod_target.test_spec_build_settings.each do |name, settings|
-            build_settings[name] = Digest::MD5.hexdigest(settings.xcconfig.to_s)
+          build_settings[pod_target.label.to_s] = Hash[pod_target.build_settings.map do |k, v|
+            [k, Digest::MD5.hexdigest(v.xcconfig.to_s)]
+          end]
+          pod_target.test_spec_build_settings_by_config.each do |name, settings_by_config|
+            build_settings[name] = Hash[settings_by_config.map { |k, v| [k, Digest::MD5.hexdigest(v.xcconfig.to_s)] }]
           end
-          pod_target.app_spec_build_settings.each do |name, settings|
-            build_settings[name] = Digest::MD5.hexdigest(settings.xcconfig.to_s)
+          pod_target.app_spec_build_settings_by_config.each do |name, settings_by_config|
+            build_settings[name] = Hash[settings_by_config.map { |k, v| [k, Digest::MD5.hexdigest(v.xcconfig.to_s)] }]
           end
 
           contents = {
             'CHECKSUM' => pod_target.root_spec.checksum,
             'SPECS' => pod_target.specs.map(&:to_s).sort_by(&:downcase),
             'BUILD_SETTINGS_CHECKSUM' => build_settings,
+            'PROJECT_NAME' => pod_target.project_name,
           }
-          contents['FILES'] = pod_target.all_files.sort_by(&:downcase) if is_local_pod
+          if is_local_pod
+            relative_file_paths = pod_target.all_files.map { |f| Pathname.new(f).relative_path_from(sandbox.root).to_s }
+            contents['FILES'] = relative_file_paths.sort_by(&:downcase)
+          end
           contents['CHECKOUT_OPTIONS'] = checkout_options if checkout_options
-          TargetCacheKey.new(:pod_target, contents)
+          TargetCacheKey.new(sandbox, :pod_target, contents)
         end
 
         # Construct a TargetCacheKey instance from an AggregateTarget.
+        #
+        # @param [Sandbox] sandbox The sandbox to use to construct a TargetCacheKey object.
         #
         # @param [AggregateTarget] aggregate_target
         #        The aggregate target used to construct a TargetCacheKey object.
         #
         # @return [TargetCacheKey]
         #
-        def self.from_aggregate_target(aggregate_target)
+        def self.from_aggregate_target(sandbox, aggregate_target)
           build_settings = {}
           aggregate_target.user_build_configurations.keys.each do |configuration|
             build_settings[configuration] = Digest::MD5.hexdigest(aggregate_target.build_settings(configuration).xcconfig.to_s)
           end
 
-          TargetCacheKey.new(:aggregate, 'BUILD_SETTINGS_CHECKSUM' => build_settings)
+          TargetCacheKey.new(sandbox, :aggregate, 'BUILD_SETTINGS_CHECKSUM' => build_settings)
         end
       end
     end

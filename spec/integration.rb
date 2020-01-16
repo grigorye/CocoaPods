@@ -124,7 +124,7 @@ describe_cli 'pod' do
   has_mercurial = $?.success?
 
   subject do |s|
-    s.executable = "ruby #{ROOT + 'bin/pod'}"
+    s.executable = "ruby -W0 #{ROOT + 'bin/pod'}"
     s.environment_vars = {
       'CLAIDE_DISABLE_AUTO_WRAP'            => 'TRUE',
       'COCOAPODS_DISABLE_STATS'             => 'TRUE',
@@ -167,6 +167,10 @@ describe_cli 'pod' do
       ^\s* Dload \s* Upload .* \n
       (^\s* [[:cntrl:]] .* \n)+
     }iox, "\\1\n"
+
+    # ignore lines in the vein of `CDN: trunk Relative path: all_pods_versions_1_3_f.txt exists!`
+    # they are somewhat non-deteministic and non-essential to testing integration
+    s.replace_pattern /.*CDN:.*\n/, ''
   end
 
   describe 'Pod install' do
@@ -289,6 +293,11 @@ describe_cli 'pod' do
                             'install --no-repo-update'
     end
 
+    describe 'Integrates a Pod with a header mappings directory on macOS' do
+      behaves_like cli_spec 'install_header_mappings_dir_macos',
+                            'install --no-repo-update'
+    end
+
     describe 'Integrates a Pod using non Objective-C source files' do
       behaves_like cli_spec 'install_non_objective_c_files',
                             'install --no-repo-update'
@@ -304,6 +313,11 @@ describe_cli 'pod' do
       # otherwise curl output is included in execution output.
       behaves_like cli_spec 'install_vendored_dynamic_framework',
                             'install --no-repo-update --no-verbose'
+    end
+
+    describe 'Integrates a Pod using a vendored xcframework' do
+      behaves_like cli_spec 'install_vendored_xcframework',
+                            'install --no-repo-update'
     end
 
     # @todo add tests for all the hooks API

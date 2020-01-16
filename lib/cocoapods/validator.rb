@@ -35,10 +35,11 @@ module Pod
     # @param  [Array<String>] source_urls
     #         the Source URLs to use in creating a {Podfile}.
     #
-    # @param. [Array<String>] platforms
+    # @param  [Array<String>] platforms
     #         the platforms to lint.
     #
     def initialize(spec_or_path, source_urls, platforms = [])
+      @use_frameworks = true
       @linter = Specification::Linter.new(spec_or_path)
       @source_urls = if @linter.spec && @linter.spec.dependencies.empty? && @linter.spec.recursive_subspecs.all? { |s| s.dependencies.empty? }
                        []
@@ -57,6 +58,7 @@ module Pod
         end
         result
       end
+      @use_frameworks = true
     end
 
     #-------------------------------------------------------------------------#
@@ -239,6 +241,10 @@ module Pod
     #
     attr_accessor :skip_tests
 
+    # @return [Bool] Whether the validator should run Xcode Static Analysis.
+    #
+    attr_accessor :analyze
+
     # @return [Bool] Whether frameworks should be used for the installation.
     #
     attr_accessor :use_frameworks
@@ -411,13 +417,18 @@ module Pod
       end
     end
 
+    # @return [Consumer] the consumer for the current platform being validated
+    #
     attr_accessor :consumer
+
+    # @return [String, Nil] the name of the current subspec being validated, or nil if none
+    #
     attr_accessor :subspec_name
 
     # Performs validation of a URL
     #
-    def validate_url(url)
-      resp = Pod::HTTP.validate_url(url)
+    def validate_url(url, user_agent = nil)
+      resp = Pod::HTTP.validate_url(url, user_agent)
 
       if !resp
         warning('url', "There was a problem validating the URL #{url}.", true)
@@ -450,7 +461,7 @@ module Pod
     # Performs validations related to the `social_media_url` attribute.
     #
     def validate_social_media_url(spec)
-      validate_url(spec.social_media_url) if spec.social_media_url
+      validate_url(spec.social_media_url, 'CocoaPods') if spec.social_media_url
     end
 
     # Performs validations related to the `documentation_url` attribute.
@@ -527,8 +538,12 @@ module Pod
     end
 
     def tear_down_validation_environment
-      validation_dir.rmtree unless no_clean
+      clean! unless no_clean
       Config.instance = @original_config
+    end
+
+    def clean!
+      validation_dir.rmtree
     end
 
     def deployment_target
@@ -547,7 +562,7 @@ module Pod
       @installer = Installer.new(sandbox, podfile)
       @installer.use_default_plugins = false
       @installer.has_dependencies = !spec.dependencies.empty?
-      %i(prepare resolve_dependencies download_dependencies).each { |m| @installer.send(m) }
+      %i(prepare resolve_dependencies download_dependencies write_lockfiles).each { |m| @installer.send(m) }
       @file_accessor = @installer.pod_targets.flat_map(&:file_accessors).find { |fa| fa.spec.name == consumer.spec.name }
     end
 
@@ -591,11 +606,15 @@ module Pod
          perform_post_install_actions).each { |m| @installer.send(m) }
 
       deployment_target = spec.subspec_by_name(subspec_name).deployment_target(consumer.platform_name)
-      configure_pod_targets(@installer.aggregate_targets, @installer.target_installation_results, deployment_target)
+      configure_pod_targets(@installer.target_installation_results)
+      validate_dynamic_framework_support(@installer.aggregate_targets, deployment_target)
       @installer.pods_project.save
     end
 
-    def configure_pod_targets(targets, target_installation_results, deployment_target)
+    # @param [Array<Hash{String, TargetInstallationResult}>] target_installation_results
+    #        The installation results to configure
+    #
+    def configure_pod_targets(target_installation_results)
       target_installation_results.first.values.each do |pod_target_installation_result|
         pod_target = pod_target_installation_result.target
         native_target = pod_target_installation_result.native_target
@@ -626,9 +645,21 @@ module Pod
           end
         end
       end
-      targets.each do |target|
-        if target.pod_targets.any?(&:uses_swift?) && consumer.platform_name == :ios &&
-            (deployment_target.nil? || Version.new(deployment_target).major < 8)
+    end
+
+    # Produces an error of dynamic frameworks were requested but are not supported by the deployment target
+    #
+    # @param [Array<AggregateTarget>] aggregate_targets
+    #        The aggregate targets installed by the installer
+    #
+    # @param [String,Version] deployment_target
+    #        The deployment target of the installation
+    #
+    def validate_dynamic_framework_support(aggregate_targets, deployment_target)
+      return unless consumer.platform_name == :ios
+      return unless deployment_target.nil? || Version.new(deployment_target).major < 8
+      aggregate_targets.each do |target|
+        if target.pod_targets.any?(&:uses_swift?)
           uses_xctest = target.spec_consumers.any? { |c| (c.frameworks + c.weak_frameworks).include? 'XCTest' }
           error('swift', 'Swift support uses dynamic frameworks and is therefore only supported on iOS > 8.') unless uses_xctest
         end
@@ -669,7 +700,18 @@ module Pod
           if scheme.nil?
             UI.warn "Skipping compilation with `xcodebuild` because target contains no sources.\n".yellow
           else
-            output = xcodebuild('build', scheme, 'Release')
+            if analyze
+              output = xcodebuild('analyze', scheme, 'Release')
+              find_output = Executable.execute_command('find', [validation_dir, '-name', '*.html'], false)
+              if find_output != ''
+                message = 'Static Analysis failed.'
+                message += ' You can use `--verbose` for more information.' unless config.verbose?
+                message += ' You can use `--no-clean` to save a reproducible buid environment.' unless no_clean
+                error('build_pod', message)
+              end
+            else
+              output = xcodebuild('build', scheme, 'Release')
+            end
             parsed_output = parse_xcodebuild_output(output)
             translate_output_to_linter_messages(parsed_output)
           end
@@ -1005,6 +1047,10 @@ module Pod
       when :tvos
         command += %w(CODE_SIGN_IDENTITY=- -sdk appletvsimulator)
         command += Fourflusher::SimControl.new.destination(:oldest, 'tvOS', deployment_target)
+      end
+
+      if analyze
+        command += %w(CLANG_ANALYZER_OUTPUT=html CLANG_ANALYZER_OUTPUT_DIR=analyzer)
       end
 
       begin

@@ -15,70 +15,69 @@ module Pod
             user_build_configurations = { 'Debug' => :debug, 'Release' => :release, 'App Store' => :release, 'Test' => :debug }
 
             @monkey_spec = fixture_spec('monkey/monkey.podspec')
-            @monkey_ios_pod_target = fixture_pod_target(@monkey_spec, false,
+            @monkey_ios_pod_target = fixture_pod_target(@monkey_spec, BuildType.static_library,
                                                         user_build_configurations, [], @ios_platform,
                                                         [@ios_target_definition], 'iOS')
-            @monkey_osx_pod_target = fixture_pod_target(@monkey_spec, false,
+            @monkey_osx_pod_target = fixture_pod_target(@monkey_spec, BuildType.static_library,
                                                         user_build_configurations, [], @osx_platform,
                                                         [@osx_target_definition], 'macOS')
 
             @banana_spec = fixture_spec('banana-lib/BananaLib.podspec')
-            @banana_ios_pod_target = fixture_pod_target(@banana_spec, false,
+            @banana_ios_pod_target = fixture_pod_target(@banana_spec, BuildType.static_library,
                                                         user_build_configurations, [], @ios_platform,
                                                         [@ios_target_definition], 'iOS')
-            @banana_osx_pod_target = fixture_pod_target(@banana_spec, false,
+            @banana_osx_pod_target = fixture_pod_target(@banana_spec, BuildType.static_library,
                                                         user_build_configurations, [], @osx_platform,
                                                         [@osx_target_definition], 'macOS')
 
             @orangeframework_spec = fixture_spec('orange-framework/OrangeFramework.podspec')
-            @orangeframework_pod_target = fixture_pod_target_with_specs([@orangeframework_spec], false,
+            @orangeframework_pod_target = fixture_pod_target_with_specs([@orangeframework_spec], BuildType.static_library,
                                                                         user_build_configurations, [], @ios_platform,
                                                                         [@ios_target_definition])
 
             @coconut_spec = fixture_spec('coconut-lib/CoconutLib.podspec')
             @coconut_test_spec = @coconut_spec.test_specs.first
             @coconut_ios_pod_target = fixture_pod_target_with_specs([@coconut_spec, @coconut_test_spec],
-                                                                    false,
+                                                                    BuildType.static_library,
                                                                     user_build_configurations, [], @ios_platform,
                                                                     [@ios_target_definition],
                                                                     'iOS')
             @coconut_ios_pod_target.dependent_targets = [@orangeframework_pod_target]
             @coconut_osx_pod_target = fixture_pod_target_with_specs([@coconut_spec, @coconut_test_spec],
-                                                                    false,
+                                                                    BuildType.static_library,
                                                                     user_build_configurations, [], @osx_platform,
                                                                     [@osx_target_definition],
                                                                     'macOS')
 
             @watermelon_spec = fixture_spec('watermelon-lib/WatermelonLib.podspec')
             @watermelon_ios_pod_target = fixture_pod_target_with_specs([@watermelon_spec,
-                                                                        *@watermelon_spec.recursive_subspecs], false,
+                                                                        *@watermelon_spec.recursive_subspecs],
+                                                                       BuildType.static_library,
                                                                        user_build_configurations, [], Platform.new(:ios, '9.0'),
                                                                        [@ios_target_definition], 'iOS')
             @watermelon_osx_pod_target = fixture_pod_target_with_specs([@watermelon_spec,
-                                                                        *@watermelon_spec.recursive_subspecs], false,
+                                                                        *@watermelon_spec.recursive_subspecs],
+                                                                       BuildType.static_library,
                                                                        user_build_configurations, [], @osx_platform,
                                                                        [@osx_target_definition], 'macOS')
 
             @grapefruits_spec = fixture_spec('grapefruits-lib/GrapefruitsLib.podspec')
+            @grapefruits_app_spec = @grapefruits_spec.app_specs.first
             @grapefruits_ios_pod_target = fixture_pod_target_with_specs([@grapefruits_spec,
-                                                                         @grapefruits_spec.app_specs.first], false,
+                                                                         @grapefruits_app_spec], BuildType.static_library,
                                                                         user_build_configurations, [], @ios_platform,
                                                                         [@ios_target_definition], 'iOS')
-            @grapefruits_ios_pod_target.app_dependent_targets_by_spec_name = { @coconut_test_spec.name => [@monkey_pod_target] }
-
-            @grapefruits_ios_pod_target.app_dependent_targets_by_spec_name[@grapefruits_ios_pod_target.app_specs.first.name] = [@banana_ios_pod_target]
+            @grapefruits_ios_pod_target.app_dependent_targets_by_spec_name = { @grapefruits_app_spec.name => [@banana_ios_pod_target] }
 
             ios_pod_targets = [@banana_ios_pod_target, @monkey_ios_pod_target, @coconut_ios_pod_target,
                                @orangeframework_pod_target, @watermelon_ios_pod_target, @grapefruits_ios_pod_target]
             osx_pod_targets = [@banana_osx_pod_target, @monkey_osx_pod_target, @coconut_osx_pod_target, @watermelon_osx_pod_target]
             pod_targets = ios_pod_targets + osx_pod_targets
 
-            @ios_target = fixture_aggregate_target(ios_pod_targets, false,
-                                                   user_build_configurations, [], @ios_platform,
-                                                   @ios_target_definition)
-            @osx_target = fixture_aggregate_target(osx_pod_targets, false,
-                                                   user_build_configurations, [], @osx_platform,
-                                                   @osx_target_definition)
+            @ios_target = fixture_aggregate_target(ios_pod_targets, BuildType.static_library, user_build_configurations,
+                                                   [], @ios_platform, @ios_target_definition)
+            @osx_target = fixture_aggregate_target(osx_pod_targets, BuildType.static_library, user_build_configurations,
+                                                   [], @osx_platform, @osx_target_definition)
 
             aggregate_targets = [@ios_target, @osx_target]
 
@@ -208,7 +207,7 @@ module Pod
             projects_by_pod_targets = pod_generator_result.projects_by_pod_targets
             pods_project = pod_generator_result.project
             projects = projects_by_pod_targets.keys
-            banana_project = projects.find { |p| p.path.basename.to_s == 'BananaLib.xcodeproj' }
+            banana_project = projects.find { |p| p.project_name == 'BananaLib' }
             banana_project.should.be.not.nil
             banana_group = banana_project.group_for_spec('BananaLib')
             banana_group.files.map(&:name).sort.should == [
@@ -219,19 +218,19 @@ module Pod
               'MoreBanana.h',
             ]
 
-            monkey_project = projects.find { |p| p.path.basename.to_s == 'monkey.xcodeproj' }
+            monkey_project = projects.find { |p| p.project_name == 'monkey' }
             monkey_project.should.not.be.nil
             monkey_group = monkey_project.group_for_spec('monkey')
             monkey_group.files.map(&:name).sort.should.be.empty # pre-built pod
 
-            orange_project = projects.find { |p| p.path.basename.to_s == 'OrangeFramework.xcodeproj' }
+            orange_project = projects.find { |p| p.project_name == 'OrangeFramework' }
             orange_project.should.not.be.nil
             organge_framework_group = orange_project.group_for_spec('OrangeFramework')
             organge_framework_group.files.map(&:name).sort.should. == [
               'Juicer.swift',
             ]
 
-            coconut_project = projects.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
+            coconut_project = projects.find { |p| p.project_name == 'CoconutLib' }
             coconut_project.should.not.be.nil
             coconut_group = coconut_project.group_for_spec('CoconutLib')
             coconut_group.files.map(&:name).sort.should == [
@@ -250,11 +249,11 @@ module Pod
             pod_generator_result = @generator.generate!
             pods_project = pod_generator_result.project
             projects = pod_generator_result.projects_by_pod_targets.keys
-            banana_project = projects.find { |p| p.path.basename.to_s == 'BananaLib.xcodeproj' }
-            coconut_project = projects.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
-            monkey_project = projects.find { |p| p.path.basename.to_s == 'monkey.xcodeproj' }
-            orange_project = projects.find { |p| p.path.basename.to_s == 'OrangeFramework.xcodeproj' }
-            watermelon_project = projects.find { |p| p.path.basename.to_s == 'WatermelonLib.xcodeproj' }
+            banana_project = projects.find { |p| p.project_name == 'BananaLib' }
+            coconut_project = projects.find { |p| p.project_name == 'CoconutLib' }
+            monkey_project = projects.find { |p| p.project_name == 'monkey' }
+            orange_project = projects.find { |p| p.project_name == 'OrangeFramework' }
+            watermelon_project = projects.find { |p| p.project_name == 'WatermelonLib' }
             banana_project.should.not.be.nil
             coconut_project.should.not.be.nil
             monkey_project.should.not.be.nil
@@ -267,16 +266,20 @@ module Pod
             ]
 
             watermelon_project.targets.map(&:name).sort.should == [
+              'AppHost-WatermelonLib-iOS-UI-Tests',
               'AppHost-WatermelonLib-iOS-Unit-Tests',
+              'AppHost-WatermelonLib-macOS-UI-Tests',
               'AppHost-WatermelonLib-macOS-Unit-Tests',
               'WatermelonLib-iOS',
               'WatermelonLib-iOS-App',
+              'WatermelonLib-iOS-UI-UITests',
               'WatermelonLib-iOS-Unit-SnapshotTests',
               'WatermelonLib-iOS-Unit-Tests',
               'WatermelonLib-iOS-WatermelonLibExampleAppResources',
               'WatermelonLib-iOS-WatermelonLibTestResources',
               'WatermelonLib-macOS',
               'WatermelonLib-macOS-App',
+              'WatermelonLib-macOS-UI-UITests',
               'WatermelonLib-macOS-Unit-SnapshotTests',
               'WatermelonLib-macOS-Unit-Tests',
               'WatermelonLib-macOS-WatermelonLibExampleAppResources',
@@ -308,7 +311,7 @@ module Pod
           it 'installs dependencies for app specs' do
             pod_generator_result = @generator.generate!
             projects = pod_generator_result.projects_by_pod_targets.keys
-            grapefruits_project = projects.find { |p| p.path.basename.to_s == 'GrapefruitsLib.xcodeproj' }
+            grapefruits_project = projects.find { |p| p.project_name == 'GrapefruitsLib' }
             grapefruits_project.main_group['Dependencies'].find_file_by_path('BananaLib.xcodeproj').should.not.be.nil
           end
 
@@ -316,18 +319,18 @@ module Pod
             pod_generator_result = @generator.generate!
             pods_project = pod_generator_result.project
             projects = pod_generator_result.projects_by_pod_targets.keys
-            banana_project = projects.find { |p| p.path.basename.to_s == 'BananaLib.xcodeproj' }
-            coconut_project = projects.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
-            monkey_project = projects.find { |p| p.path.basename.to_s == 'monkey.xcodeproj' }
+            banana_project = projects.find { |p| p.project_name == 'BananaLib' }
+            coconut_project = projects.find { |p| p.project_name == 'CoconutLib' }
+            monkey_project = projects.find { |p| p.project_name == 'monkey' }
             banana_project.should.not.be.nil
             coconut_project.should.not.be.nil
             monkey_project.should.not.be.nil
 
-            banana_project.targets.find { |t| t.name == 'BananaLib-iOS' }.dependencies.map(&:name).should.be.empty
-            banana_project.targets.find { |t| t.name == 'BananaLib-macOS' }.dependencies.map(&:name).should.be.empty
-            coconut_project.targets.find { |t| t.name == 'CoconutLib-macOS' }.dependencies.map(&:name).should.be.empty
-            monkey_project.targets.find { |t| t.name == 'monkey-iOS' }.dependencies.map(&:name).should.be.empty
-            monkey_project.targets.find { |t| t.name == 'monkey-macOS' }.dependencies.map(&:name).should.be.empty
+            banana_project.targets.find { |t| t.name == 'BananaLib-iOS' }.dependencies.should.be.empty
+            banana_project.targets.find { |t| t.name == 'BananaLib-macOS' }.dependencies.should.be.empty
+            coconut_project.targets.find { |t| t.name == 'CoconutLib-macOS' }.dependencies.should.be.empty
+            monkey_project.targets.find { |t| t.name == 'monkey-iOS' }.dependencies.should.be.empty
+            monkey_project.targets.find { |t| t.name == 'monkey-macOS' }.dependencies.should.be.empty
             coconut_project.targets.find { |t| t.name == 'CoconutLib-iOS' }.dependencies.map(&:name).sort.should == [
               'OrangeFramework',
             ]
@@ -355,7 +358,7 @@ module Pod
           end
 
           it 'adds system frameworks to dynamic targets' do
-            @orangeframework_pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
+            @orangeframework_pod_target.stubs(:build_type => BuildType.dynamic_framework)
             pod_generator_result = @generator.generate!
             orange_project = pod_generator_result.projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'OrangeFramework.xcodeproj' }
             orange_project.should.not.be.nil
@@ -367,9 +370,9 @@ module Pod
 
           it 'adds target dependencies when inheriting search paths' do
             inherited_target_definition = fixture_target_definition('SampleApp-iOS-Tests', @ios_platform)
-            inherited_target = fixture_aggregate_target([], false,
-                                                        @ios_target.user_build_configurations, [],
-                                                        @ios_target.platform, inherited_target_definition)
+            inherited_target = fixture_aggregate_target([], BuildType.static_library,
+                                                        @ios_target.user_build_configurations, [], @ios_target.platform,
+                                                        inherited_target_definition)
             inherited_target.search_paths_aggregate_targets << @ios_target
             @generator.aggregate_targets << inherited_target
             pod_generator_result = @generator.generate!
@@ -379,7 +382,7 @@ module Pod
           end
 
           it 'sets resource bundle target dependencies' do
-            @banana_spec.resource_bundles = { 'BananaLibResourcesBundle' => '**/*' }
+            @banana_spec.resource_bundles = { 'BananaLibResourcesBundle' => 'Resources/logo-sidebar.png' }
             pod_generator_result = @generator.generate!
             banana_project = pod_generator_result.projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'BananaLib.xcodeproj' }
             banana_project.should.not.be.nil
@@ -394,7 +397,7 @@ module Pod
           end
 
           it 'sets test resource bundle dependencies' do
-            @coconut_test_spec.resource_bundles = { 'CoconutLibTestResourcesBundle' => '**/*' }
+            @coconut_test_spec.resource_bundles = { 'CoconutLibTestResourcesBundle' => 'Coconut.h' }
             pod_generator_result = @generator.generate!
             coconut_project = pod_generator_result.projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
             coconut_project.should.not.be.nil
@@ -426,9 +429,34 @@ module Pod
             ]
           end
 
+          it 'sets the app host app spec dependency for the tests that need it' do
+            @coconut_test_spec.ios.requires_app_host = true
+            @coconut_test_spec.ios.app_host_name = @grapefruits_app_spec.name
+            @coconut_ios_pod_target.test_app_hosts_by_spec_name = { @coconut_test_spec.name => [@grapefruits_app_spec, @grapefruits_ios_pod_target] }
+            pod_generator_result = @generator.generate!
+            coconut_project = pod_generator_result.projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
+            coconut_project.should.not.be.nil
+            coconut_project.targets.find { |t| t.name == 'AppHost-CoconutLib-iOS-Unit-Tests' }.should.be.nil
+            coconut_project.targets.find { |t| t.name == 'CoconutLib-iOS-Unit-Tests' }.dependencies.map(&:name).sort.should == [
+              'CoconutLib-iOS',
+              'GrapefruitsLib-iOS-App',
+            ]
+            coconut_project.targets.find { |t| t.name == 'AppHost-CoconutLib-macOS-Unit-Tests' }.should.be.nil
+            coconut_project.targets.find { |t| t.name == 'CoconutLib-macOS-Unit-Tests' }.dependencies.map(&:name).should == [
+              'CoconutLib-macOS',
+            ]
+          end
+
+          it 'raises when a test spec has an app_host_name with requires_app_host = false' do
+            @coconut_test_spec.ios.requires_app_host = false
+            @coconut_test_spec.ios.app_host_name = @grapefruits_app_spec.name + '/Foo'
+            -> { @generator.generate! }.should.raise(Informative).
+              message.should.include '`CoconutLib-iOS-unit-Tests` manually specifies an app host but has not specified `requires_app_host = true`.'
+          end
+
           it 'adds framework file references for framework pod targets that require building' do
-            @orangeframework_pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
-            @coconut_ios_pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
+            @orangeframework_pod_target.stubs(:build_type => BuildType.dynamic_framework)
+            @coconut_ios_pod_target.stubs(:build_type => BuildType.dynamic_framework)
             @coconut_ios_pod_target.stubs(:should_build?).returns(true)
             pod_generator_result = @generator.generate!
             coconut_project = pod_generator_result.projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
@@ -448,9 +476,24 @@ module Pod
             coconut_project.main_group['Dependencies'].find_file_by_path('OrangeFramework.xcodeproj').should.not.be.nil
           end
 
+          it 'generates a different project name if the pod target has one specified' do
+            @coconut_ios_pod_target.stubs(:project_name => 'CustomProjectName')
+            pod_generator_result = @generator.generate!
+            coconut_project = pod_generator_result.projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'CustomProjectName.xcodeproj' }
+            coconut_project.should.not.be.nil
+          end
+
+          it 'adds dependency project references for pods with custom project names' do
+            @orangeframework_pod_target.stubs(:project_name => 'OrangeFrameworkCustomProjectName')
+            pod_generator_result = @generator.generate!
+            coconut_project = pod_generator_result.projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
+            coconut_project.should.not.be.nil
+            coconut_project.main_group['Dependencies'].find_file_by_path('OrangeFrameworkCustomProjectName.xcodeproj').should.not.be.nil
+          end
+
           it 'does not add framework references for framework pod targets that do not require building' do
-            @orangeframework_pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
-            @coconut_ios_pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
+            @orangeframework_pod_target.stubs(:build_type => BuildType.dynamic_framework)
+            @coconut_ios_pod_target.stubs(:build_type => BuildType.dynamic_framework)
             @coconut_ios_pod_target.stubs(:should_build?).returns(false)
             pod_generator_result = @generator.generate!
             coconut_project = pod_generator_result.projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
@@ -492,60 +535,6 @@ module Pod
             }
           end
 
-          it 'configures APPLICATION_EXTENSION_API_ONLY for pod targets of an aggregate target' do
-            user_target = stub('SampleApp-iOS-User-Target', :symbol_type => :app_extension)
-            @ios_target.stubs(:user_targets).returns([user_target])
-            pod_generator_result = @generator.generate!
-            projects_by_pod_targets = pod_generator_result.projects_by_pod_targets
-            pod_generator_result.project.targets.find { |t| t.name == 'Pods-SampleApp-iOS' }.dependencies.each do |dependency|
-              project = projects_by_pod_targets.find { |_, pod_targets| pod_targets.find { |t| t.label == dependency.name } }.first
-              build_settings = project.targets.find { |t| t.name == dependency.name }.build_configurations.map(&:build_settings)
-              build_settings.each do |build_setting|
-                build_setting['APPLICATION_EXTENSION_API_ONLY'].should == 'YES'
-              end
-            end
-          end
-
-          it 'configures APPLICATION_EXTENSION_API_ONLY for app extension targets' do
-            user_target = stub('SampleApp-iOS-User-Target', :symbol_type => :app_extension)
-            @ios_target.stubs(:user_targets).returns([user_target])
-            pod_generator_result = @generator.generate!
-            build_settings = pod_generator_result.project.targets.find { |t| t.name == 'Pods-SampleApp-iOS' }.build_configurations.map(&:build_settings)
-            build_settings.each do |build_setting|
-              build_setting['APPLICATION_EXTENSION_API_ONLY'].should == 'YES'
-            end
-          end
-
-          it 'configures APPLICATION_EXTENSION_API_ONLY for watch2 extension targets' do
-            user_target = stub('SampleApp-iOS-User-Target', :symbol_type => :watch2_extension)
-            @ios_target.stubs(:user_targets).returns([user_target])
-            pod_generator_result = @generator.generate!
-            build_settings = pod_generator_result.project.targets.find { |t| t.name == 'Pods-SampleApp-iOS' }.build_configurations.map(&:build_settings)
-            build_settings.each do |build_setting|
-              build_setting['APPLICATION_EXTENSION_API_ONLY'].should == 'YES'
-            end
-          end
-
-          it 'configures APPLICATION_EXTENSION_API_ONLY for tvOS extension targets' do
-            user_target = stub('SampleApp-iOS-User-Target', :symbol_type => :tv_extension)
-            @ios_target.stubs(:user_targets).returns([user_target])
-            pod_generator_result = @generator.generate!
-            build_settings = pod_generator_result.project.targets.find { |t| t.name == 'Pods-SampleApp-iOS' }.build_configurations.map(&:build_settings)
-            build_settings.each do |build_setting|
-              build_setting['APPLICATION_EXTENSION_API_ONLY'].should == 'YES'
-            end
-          end
-
-          it 'configures APPLICATION_EXTENSION_API_ONLY for Messages extension targets' do
-            user_target = stub('SampleApp-iOS-User-Target', :symbol_type => :messages_extension)
-            @ios_target.stubs(:user_targets).returns([user_target])
-            pod_generator_result = @generator.generate!
-            build_settings = pod_generator_result.project.targets.find { |t| t.name == 'Pods-SampleApp-iOS' }.build_configurations.map(&:build_settings)
-            build_settings.each do |build_setting|
-              build_setting['APPLICATION_EXTENSION_API_ONLY'].should == 'YES'
-            end
-          end
-
           it "uses the user project's object version for the all projects" do
             tmp_directory = Pathname(Dir.tmpdir) + 'CocoaPods'
             FileUtils.mkdir_p(tmp_directory)
@@ -553,9 +542,8 @@ module Pod
             proj.save
 
             user_target = stub('SampleApp-iOS-User-Target', :symbol_type => :application)
-            user_target.expects(:common_resolved_build_setting).with('APPLICATION_EXTENSION_API_ONLY').returns('NO')
 
-            target = AggregateTarget.new(config.sandbox, false,
+            target = AggregateTarget.new(config.sandbox, BuildType.static_library,
                                          { 'App Store' => :release, 'Debug' => :debug, 'Release' => :release, 'Test' => :debug },
                                          [], Platform.new(:ios, '6.0'), fixture_target_definition,
                                          config.sandbox.root.dirname, proj, nil, {})
@@ -588,6 +576,11 @@ module Pod
           end
 
           describe '#write' do
+            before do
+              Xcodeproj::Project.any_instance.stubs(:recreate_user_schemes)
+              Xcodeproj::Project.any_instance.stubs(:save)
+            end
+
             it 'recursively sorts the project' do
               pod_generator_result = @generator.generate!
               pods_project = pod_generator_result.project
@@ -595,7 +588,6 @@ module Pod
               pod_generator_result.projects_by_pod_targets.keys.each do |target_project|
                 target_project.main_group.expects(:sort)
               end
-              Xcodeproj::Project.any_instance.stubs(:recreate_user_schemes)
               generated_projects = [pods_project] + pod_generator_result.projects_by_pod_targets.keys
               Xcode::PodsProjectWriter.new(@generator.sandbox, generated_projects,
                                            pod_generator_result.target_installation_results.pod_target_installation_results,
@@ -698,7 +690,9 @@ module Pod
 
             it 'correctly configures schemes for all specs' do
               @coconut_spec.scheme = { :launch_arguments => ['Arg1'] }
-              @coconut_test_spec.scheme = { :launch_arguments => ['TestArg1'], :environment_variables => { 'Key1' => 'Val1' } }
+              @coconut_test_spec.scheme = { :launch_arguments => ['TestArg1'],
+                                            :environment_variables => { 'Key1' => 'Val1' },
+                                            :code_coverage => true }
               @generator.installation_options.
                   stubs(:share_schemes_for_development_pods).
                   returns(true)
@@ -707,7 +701,7 @@ module Pod
               pod_generator_result = @generator.generate!
 
               projects_by_pod_targets = pod_generator_result.projects_by_pod_targets
-              coconut_project = projects_by_pod_targets.keys.find { |p| p.path.basename.to_s == 'CoconutLib.xcodeproj' }
+              coconut_project = projects_by_pod_targets.keys.find { |p| p.project_name == 'CoconutLib' }
 
               Xcode::PodsProjectWriter.new(config.sandbox, [coconut_project],
                                            pod_generator_result.target_installation_results.pod_target_installation_results,
@@ -728,6 +722,7 @@ module Pod
               test_scheme.launch_action.environment_variables.all_variables.map(&:to_h).should == [
                 { :key => 'Key1', :value => 'Val1', :enabled => true },
               ]
+              test_scheme.test_action.code_coverage_enabled?.should.be.true
             end
 
             it 'allows opting out' do

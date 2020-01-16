@@ -1,3 +1,5 @@
+require 'cocoapods/xcode'
+
 module Pod
   class Installer
     class Xcode
@@ -48,7 +50,7 @@ module Pod
               resource_bundle_targets = add_resources_bundle_targets(library_file_accessors).values.flatten
 
               test_native_targets = add_test_targets
-              test_app_host_targets = add_test_app_host_targets(test_native_targets)
+              test_app_host_targets = add_test_app_host_targets
               test_resource_bundle_targets = add_resources_bundle_targets(test_file_accessors)
 
               app_native_targets = add_app_targets
@@ -56,6 +58,7 @@ module Pod
 
               add_files_to_build_phases(native_target, test_native_targets, app_native_targets)
               validate_targets_contain_sources(test_native_targets + app_native_targets + [native_target])
+              validate_xcframeworks_no_mixed_linkage
 
               create_xcconfig_file(native_target, resource_bundle_targets)
               create_test_xcconfig_files(test_native_targets, test_resource_bundle_targets)
@@ -69,11 +72,11 @@ module Pod
                   generator.imports += library_file_accessors.flat_map do |file_accessor|
                     header_dir = if !target.build_as_framework? && dir = file_accessor.spec_consumer.header_dir
                                    Pathname.new(dir)
-                    end
+                                 end
 
                     file_accessor.public_headers.map do |public_header|
-                      public_header = if header_mappings_dir
-                                        public_header.relative_path_from(header_mappings_dir)
+                      public_header = if header_mappings_dir(file_accessor)
+                                        public_header.relative_path_from(header_mappings_dir(file_accessor))
                                       else
                                         public_header.basename
                                       end
@@ -88,7 +91,7 @@ module Pod
 
               if target.build_as_framework?
                 unless skip_info_plist?(native_target)
-                  create_info_plist_file(target.info_plist_path, native_target, target.version, target.platform)
+                  create_info_plist_file(target.info_plist_path, native_target, target.version, target.platform, :additional_entries => target.info_plist_entries)
                 end
                 create_build_phase_to_symlink_header_folders(native_target)
               end
@@ -148,14 +151,18 @@ module Pod
           # Removes overrides of the `pod_target_xcconfig` settings from the target's
           # build configurations.
           #
-          # @return [Void]
-          #
-          # @param [Target::BuildSettings] build_settings
+          # @param [Hash{Symbol => Pod::Target::BuildSettings}] build_settings_by_config the build settings by config
+          #        of the target.
           #
           # @param [PBXNativeTarget] native_target
+          #        the native target to remove pod target xcconfig overrides from.
           #
-          def remove_pod_target_xcconfig_overrides_from_target(build_settings, native_target)
+          # @return [Void]
+          #
+          #
+          def remove_pod_target_xcconfig_overrides_from_target(build_settings_by_config, native_target)
             native_target.build_configurations.each do |configuration|
+              build_settings = build_settings_by_config[target.user_build_configurations[configuration.name]]
               build_settings.merged_pod_target_xcconfigs.each_key do |setting|
                 configuration.build_settings.delete(setting)
               end
@@ -287,17 +294,23 @@ module Pod
               {
                 true => file_accessor.arc_source_files,
                 false => file_accessor.non_arc_source_files,
-              }.each do |arc, files|
-                next if files.empty?
-                files = files - headers - other_source_files
-                flags = compiler_flags_for_consumer(consumer, arc)
-                regular_file_refs = project_file_references_array(files, 'source')
-                native_target.add_file_references(regular_file_refs, flags)
+              }.each do |arc, source_files|
+                next if source_files.empty?
+                source_files = source_files - headers - other_source_files
+                swift_source_files, non_swift_source_files = source_files.partition { |file| file.extname == '.swift' }
+                {
+                  :objc => non_swift_source_files,
+                  :swift => swift_source_files,
+                }.each do |language, files|
+                  compiler_flags = compiler_flags_for_consumer(consumer, arc, language)
+                  file_refs = project_file_references_array(files, 'source')
+                  native_target.add_file_references(file_refs, compiler_flags)
+                end
               end
 
               header_file_refs = project_file_references_array(headers, 'header')
               native_target.add_file_references(header_file_refs) do |build_file|
-                add_header(build_file, public_headers, private_headers, native_target)
+                add_header(file_accessor, build_file, public_headers, private_headers, native_target)
               end
 
               other_file_refs = project_file_references_array(other_source_files, 'other source')
@@ -325,7 +338,9 @@ module Pod
               name = target.test_target_label(test_spec)
               platform_name = target.platform.name
               language = target.uses_swift_for_spec?(test_spec) ? :swift : :objc
-              test_native_target = project.new_target(product_type, name, platform_name, deployment_target, nil, language)
+              test_native_target = project.new_target(product_type, name, platform_name,
+                                                      target.deployment_target_for_non_library_spec(test_spec), nil,
+                                                      language)
               test_native_target.product_reference.name = name
 
               target.user_build_configurations.each do |bc_name, type|
@@ -357,16 +372,19 @@ module Pod
                 configuration.build_settings['CODE_SIGN_IDENTITY'] = '' if target.platform == :osx
               end
 
-              remove_pod_target_xcconfig_overrides_from_target(target.build_settings_for_spec(test_spec), test_native_target)
+              remove_pod_target_xcconfig_overrides_from_target(target.test_spec_build_settings_by_config[test_spec.name], test_native_target)
 
               # Test native targets also need frameworks and resources to be copied over to their xctest bundle.
+              create_test_target_prepare_artifacts_script(test_spec)
               create_test_target_embed_frameworks_script(test_spec)
               create_test_target_copy_resources_script(test_spec)
 
               # Generate vanilla Info.plist for test target similar to the one Xcode generates for new test target.
               # This creates valid test bundle accessible at the runtime, allowing tests to load bundle resources
               # defined in podspec.
-              create_info_plist_file(target.info_plist_path_for_spec(test_spec), test_native_target, '1.0', target.platform, :bndl)
+              additional_entries = spec_consumer.info_plist
+              path = target.info_plist_path_for_spec(test_spec)
+              create_info_plist_file(path, test_native_target, '1.0', target.platform, :bndl, :additional_entries => additional_entries)
 
               test_native_target
             end
@@ -375,32 +393,17 @@ module Pod
           # Adds the test app host targets for the library to the Pods project with the
           # appropriate build configurations.
           #
-          # @param  [Array<PBXNativeTarget>] test_native_targets
-          #         the test native targets that have been created to use as a lookup when linking the app host to.
-          #
           # @return [Array<PBXNativeTarget>] the app host targets created.
           #
-          def add_test_app_host_targets(test_native_targets)
-            target.test_spec_consumers.select(&:requires_app_host?).group_by(&:test_type).map do |test_type, test_spec_consumers|
-              platform = target.platform
-              name = "AppHost-#{target.label}-#{test_type.capitalize}-Tests"
-              app_host_target = AppHostInstaller.new(sandbox, project, platform, name, target.pod_name, name).install!
-              # Wire test native targets to the generated app host.
-              test_spec_consumers.each do |test_spec_consumer|
-                test_native_target = test_native_target_from_spec(test_spec_consumer.spec, test_native_targets)
-                test_native_target.build_configurations.each do |configuration|
-                  test_host = "$(BUILT_PRODUCTS_DIR)/#{app_host_target.name}.app/"
-                  test_host << 'Contents/MacOS/' if platform == :osx
-                  test_host << app_host_target.name.to_s
-                  configuration.build_settings['TEST_HOST'] = test_host
-                end
-                target_attributes = project.root_object.attributes['TargetAttributes'] || {}
-                target_attributes[test_native_target.uuid.to_s] = { 'TestTargetID' => app_host_target.uuid.to_s }
-                project.root_object.attributes['TargetAttributes'] = target_attributes
-                test_native_target.add_dependency(app_host_target)
-              end
-              app_host_target
+          def add_test_app_host_targets
+            target.test_spec_consumers.reject(&:requires_app_host?).select(&:app_host_name).each do |test_spec_consumer|
+              raise Informative, "`#{target.label}-#{test_spec_consumer.test_type}-Tests` manually specifies an app host but has not specified `requires_app_host = true`."
             end
+
+            target.test_spec_consumers.select(&:requires_app_host?).reject(&:app_host_name).group_by { |consumer| target.app_host_target_label(consumer.spec) }.
+              map do |(_, target_name), _|
+                AppHostInstaller.new(sandbox, project, target.platform, target_name, target.pod_name, target_name).install!
+              end
           end
 
           # Adds the app targets for the library to the Pods project with the
@@ -410,12 +413,18 @@ module Pod
           #
           def add_app_targets
             target.app_specs.map do |app_spec|
+              spec_consumer = app_spec.consumer(target.platform)
               spec_name = app_spec.parent.name
               subspec_name = target.subspec_label(app_spec)
               app_target_label = target.app_target_label(app_spec)
-              platform = target.platform
+              platform = Platform.new(target.platform.symbolic_name, target.deployment_target_for_non_library_spec(app_spec))
+              info_plist_entries = spec_consumer.info_plist
+              resources = target.file_accessors.find { |fa| fa.spec == app_spec }.resources
+              add_launchscreen_storyboard = resources.none? { |resource| resource.basename.to_s == 'LaunchScreen.storyboard' } && platform.name == :ios
               app_native_target = AppHostInstaller.new(sandbox, project, platform, subspec_name, spec_name,
-                                                       app_target_label, :add_main => false).install!
+                                                       app_target_label, :add_main => false,
+                                                                         :add_launchscreen_storyboard => add_launchscreen_storyboard,
+                                                                         :info_plist_entries => info_plist_entries).install!
 
               app_native_target.product_reference.name = app_target_label
               target.user_build_configurations.each do |bc_name, type|
@@ -447,13 +456,20 @@ module Pod
                 end
                 # For macOS we do not code sign the appbundle because we do not code sign the frameworks either.
                 configuration.build_settings['CODE_SIGN_IDENTITY'] = '' if target.platform == :osx
+                # For iOS, we delete the target_installer empty values that get set for libraries since CocoaPods will
+                # code sign the libraries manually but for apps this is not true.
+                if target.platform == :ios
+                  configuration.build_settings.delete('CODE_SIGN_IDENTITY[sdk=appletvos*]')
+                  configuration.build_settings.delete('CODE_SIGN_IDENTITY[sdk=iphoneos*]')
+                  configuration.build_settings.delete('CODE_SIGN_IDENTITY[sdk=watchos*]')
+                end
               end
 
-              remove_pod_target_xcconfig_overrides_from_target(target.build_settings_for_spec(app_spec), app_native_target)
+              remove_pod_target_xcconfig_overrides_from_target(target.app_spec_build_settings_by_config[app_spec.name], app_native_target)
 
               create_app_target_embed_frameworks_script(app_spec)
               create_app_target_copy_resources_script(app_spec)
-              add_resources_to_target(target.file_accessors.find { |fa| fa.spec == app_spec }.resources, app_native_target)
+              add_resources_to_target(resources, app_native_target)
 
               app_native_target
             end
@@ -484,7 +500,7 @@ module Pod
           # @param  [Array<Sandbox::FileAccessor>] file_accessors
           #         the file accessors list to generate resource bundles for.
           #
-          # @return [Array<PBXNativeTarget>] the resource bundle native targets created.
+          # @return [Hash{String=>Array<PBXNativeTarget>}] the resource bundle native targets created.
           #
           def add_resources_bundle_targets(file_accessors)
             file_accessors.each_with_object({}) do |file_accessor, hash|
@@ -501,8 +517,11 @@ module Pod
                 target.user_build_configurations.each do |bc_name, type|
                   resource_bundle_target.add_build_configuration(bc_name, type)
                 end
-                resource_bundle_target.deployment_target = deployment_target
-
+                resource_bundle_target.deployment_target = if file_accessor.spec.non_library_specification?
+                                                             target.deployment_target_for_non_library_spec(file_accessor.spec)
+                                                           else
+                                                             deployment_target
+                                                           end
                 # Create Info.plist file for bundle
                 path = target.info_plist_path
                 path.dirname.mkdir unless path.dirname.exist?
@@ -518,6 +537,10 @@ module Pod
                     configuration.build_settings['CONFIGURATION_BUILD_DIR'] = target.configuration_build_dir('$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)')
                   end
 
+                  # Set the 'IBSC_MODULE' build settings for resource bundles so that Storyboards and Xibs can load
+                  # classes from the parent module.
+                  configuration.build_settings['IBSC_MODULE'] = target.product_module_name
+
                   # Set the `SWIFT_VERSION` build setting for resource bundles that could have resources that get
                   # compiled such as an `xcdatamodeld` file which has 'Swift' as its code generation language.
                   if contains_compile_phase_refs && file_accessors.any? { |fa| target.uses_swift_for_spec?(fa.spec) }
@@ -528,7 +551,7 @@ module Pod
                   device_family_by_platform = {
                     :ios => '1,2',
                     :tvos => '3',
-                    :watchos => '1,2' # The device family for watchOS is 4, but Xcode creates watchkit-compatible bundles as 1,2
+                    :watchos => '1,2,4',
                   }
 
                   if (family = device_family_by_platform[target.platform.name])
@@ -536,7 +559,7 @@ module Pod
                   end
                 end
 
-                remove_pod_target_xcconfig_overrides_from_target(target.build_settings_for_spec(file_accessor.spec), resource_bundle_target)
+                remove_pod_target_xcconfig_overrides_from_target(target.build_settings_by_config_for_spec(file_accessor.spec), resource_bundle_target)
 
                 resource_bundle_target
               end
@@ -554,12 +577,14 @@ module Pod
           # @return [void]
           #
           def create_xcconfig_file(native_target, resource_bundle_targets)
-            path = target.xcconfig_path
-            update_changed_file(target.build_settings, path)
-            xcconfig_file_ref = add_file_to_support_group(path)
+            target.user_config_names_by_config_type.each do |config, names|
+              path = target.xcconfig_path(config)
+              update_changed_file(target.build_settings[config], path)
+              xcconfig_file_ref = add_file_to_support_group(path)
 
-            # also apply the private config to resource bundle targets.
-            apply_xcconfig_file_ref_to_targets([native_target] + resource_bundle_targets, xcconfig_file_ref)
+              # also apply the private config to resource bundle targets.
+              apply_xcconfig_file_ref_to_targets([native_target] + resource_bundle_targets, xcconfig_file_ref, names)
+            end
           end
 
           # Generates the contents of the xcconfig file used for each test target type and saves it to disk.
@@ -576,19 +601,22 @@ module Pod
             target.test_specs.each do |test_spec|
               spec_consumer = test_spec.consumer(target.platform)
               test_type = spec_consumer.test_type
-              path = target.xcconfig_path("#{test_type.capitalize}-#{target.subspec_label(test_spec)}")
-              test_spec_build_settings = target.build_settings_for_spec(test_spec)
-              update_changed_file(test_spec_build_settings, path)
-              test_xcconfig_file_ref = add_file_to_support_group(path)
-
               test_native_target = test_native_target_from_spec(spec_consumer.spec, test_native_targets)
+
+              target.user_config_names_by_config_type.each do |config, names|
+                path = target.xcconfig_path("#{test_type.capitalize}-#{target.subspec_label(test_spec)}.#{config}")
+                test_spec_build_settings = target.build_settings_for_spec(test_spec, :configuration => config)
+                update_changed_file(test_spec_build_settings, path)
+                test_xcconfig_file_ref = add_file_to_support_group(path)
+
+                # also apply the private config to resource bundle test targets related to this test spec.
+                scoped_test_resource_bundle_targets = test_resource_bundle_targets[test_spec.name]
+                apply_xcconfig_file_ref_to_targets([test_native_target] + scoped_test_resource_bundle_targets, test_xcconfig_file_ref, names)
+              end
+
               test_native_target.build_configurations.each do |test_native_target_bc|
                 test_target_swift_debug_hack(test_spec, test_native_target_bc)
               end
-
-              # also apply the private config to resource bundle test targets related to this test spec.
-              scoped_test_resource_bundle_targets = test_resource_bundle_targets[test_spec.name]
-              apply_xcconfig_file_ref_to_targets([test_native_target] + scoped_test_resource_bundle_targets, test_xcconfig_file_ref)
             end
           end
 
@@ -601,17 +629,49 @@ module Pod
           #
           def create_test_target_copy_resources_script(test_spec)
             path = target.copy_resources_script_path_for_spec(test_spec)
-            pod_targets = target.dependent_targets_for_test_spec(test_spec)
-            resource_paths_by_config = target.user_build_configurations.keys.each_with_object({}) do |config, resources_by_config|
-              resources_by_config[config] = pod_targets.flat_map do |pod_target|
+            host_target_spec_names = target.app_host_dependent_targets_for_spec(test_spec).flat_map do |pt|
+              pt.specs.map(&:name)
+            end.uniq
+            resource_paths_by_config = target.user_build_configurations.each_with_object({}) do |(config_name, config), resources_by_config|
+              resources_by_config[config_name] = target.dependent_targets_for_test_spec(test_spec, :configuration => config).flat_map do |pod_target|
                 spec_paths_to_include = pod_target.host_requires_frameworks ? [] : pod_target.library_specs.map(&:name)
+                spec_paths_to_include -= host_target_spec_names
                 spec_paths_to_include << test_spec.name if pod_target == target
                 pod_target.resource_paths.values_at(*spec_paths_to_include).flatten.compact
               end
             end
-            generator = Generator::CopyResourcesScript.new(resource_paths_by_config, target.platform)
-            update_changed_file(generator, path)
-            add_file_to_support_group(path)
+            unless resource_paths_by_config.each_value.all?(&:empty?)
+              generator = Generator::CopyResourcesScript.new(resource_paths_by_config, target.platform)
+              update_changed_file(generator, path)
+              add_file_to_support_group(path)
+            end
+          end
+
+          # Creates a script that prepares artifacts for the test target.
+          #
+          # @param [Specification] test_spec
+          #        The test spec to create the script for.
+          #
+          # @return [void]
+          #
+          def create_test_target_prepare_artifacts_script(test_spec)
+            path = target.prepare_artifacts_script_path_for_spec(test_spec)
+            host_target_spec_names = target.app_host_dependent_targets_for_spec(test_spec).flat_map do |pt|
+              pt.specs.map(&:name)
+            end.uniq
+            frameworks_by_config = target.user_build_configurations.each_with_object({}) do |(config_name, config), paths_by_config|
+              paths_by_config[config_name] = target.dependent_targets_for_test_spec(test_spec, :configuration => config).flat_map do |pod_target|
+                spec_paths_to_include = pod_target.library_specs.map(&:name)
+                spec_paths_to_include -= host_target_spec_names
+                spec_paths_to_include << test_spec.name if pod_target == target
+                pod_target.xcframeworks.values_at(*spec_paths_to_include).flatten.compact.uniq
+              end
+            end
+            unless frameworks_by_config.each_value.all?(&:empty?)
+              generator = Generator::PrepareArtifactsScript.new(frameworks_by_config, target.sandbox.root, target.platform)
+              update_changed_file(generator, path)
+              add_file_to_support_group(path)
+            end
           end
 
           # Creates a script that embeds the frameworks to the bundle of the test target.
@@ -623,17 +683,22 @@ module Pod
           #
           def create_test_target_embed_frameworks_script(test_spec)
             path = target.embed_frameworks_script_path_for_spec(test_spec)
-            pod_targets = target.dependent_targets_for_test_spec(test_spec)
-            framework_paths_by_config = target.user_build_configurations.keys.each_with_object({}) do |config, paths_by_config|
-              paths_by_config[config] = pod_targets.flat_map do |pod_target|
+            host_target_spec_names = target.app_host_dependent_targets_for_spec(test_spec).flat_map do |pt|
+              pt.specs.map(&:name)
+            end.uniq
+            framework_paths_by_config = target.user_build_configurations.each_with_object({}) do |(config_name, config), paths_by_config|
+              paths_by_config[config_name] = target.dependent_targets_for_test_spec(test_spec, :configuration => config).flat_map do |pod_target|
                 spec_paths_to_include = pod_target.library_specs.map(&:name)
+                spec_paths_to_include -= host_target_spec_names
                 spec_paths_to_include << test_spec.name if pod_target == target
                 pod_target.framework_paths.values_at(*spec_paths_to_include).flatten.compact.uniq
               end
             end
-            generator = Generator::EmbedFrameworksScript.new(framework_paths_by_config)
-            update_changed_file(generator, path)
-            add_file_to_support_group(path)
+            unless framework_paths_by_config.each_value.all?(&:empty?)
+              generator = Generator::EmbedFrameworksScript.new(framework_paths_by_config)
+              update_changed_file(generator, path)
+              add_file_to_support_group(path)
+            end
           end
 
           # Generates the contents of the xcconfig file used for each app target type and saves it to disk.
@@ -649,15 +714,18 @@ module Pod
           def create_app_xcconfig_files(app_native_targets, app_resource_bundle_targets)
             target.app_specs.each do |app_spec|
               spec_consumer = app_spec.consumer(target.platform)
-              path = target.xcconfig_path(target.subspec_label(app_spec))
-              update_changed_file(target.build_settings_for_spec(app_spec), path)
-              app_xcconfig_file_ref = add_file_to_support_group(path)
-
               app_native_target = app_native_target_from_spec(spec_consumer.spec, app_native_targets)
 
-              # also apply the private config to resource bundle app targets related to this app spec.
-              scoped_app_resource_bundle_targets = app_resource_bundle_targets[app_spec.name]
-              apply_xcconfig_file_ref_to_targets([app_native_target] + scoped_app_resource_bundle_targets, app_xcconfig_file_ref)
+              target.user_config_names_by_config_type.each do |config, names|
+                path = target.xcconfig_path("#{target.subspec_label(app_spec)}.#{config}")
+                app_spec_build_settings = target.build_settings_for_spec(app_spec, :configuration => config)
+                update_changed_file(app_spec_build_settings, path)
+                app_xcconfig_file_ref = add_file_to_support_group(path)
+
+                # also apply the private config to resource bundle app targets related to this app spec.
+                scoped_app_resource_bundle_targets = app_resource_bundle_targets[app_spec.name]
+                apply_xcconfig_file_ref_to_targets([app_native_target] + scoped_app_resource_bundle_targets, app_xcconfig_file_ref, names)
+              end
             end
           end
 
@@ -670,17 +738,19 @@ module Pod
           #
           def create_app_target_copy_resources_script(app_spec)
             path = target.copy_resources_script_path_for_spec(app_spec)
-            pod_targets = target.dependent_targets_for_app_spec(app_spec)
-            resource_paths_by_config = target.user_build_configurations.keys.each_with_object({}) do |config, resources_by_config|
-              resources_by_config[config] = pod_targets.flat_map do |pod_target|
+            resource_paths_by_config = target.user_build_configurations.each_with_object({}) do |(config_name, config), resources_by_config|
+              pod_targets = target.dependent_targets_for_app_spec(app_spec, :configuration => config)
+              resources_by_config[config_name] = pod_targets.flat_map do |pod_target|
                 spec_paths_to_include = pod_target.library_specs.map(&:name)
                 spec_paths_to_include << app_spec.name if pod_target == target
                 pod_target.resource_paths.values_at(*spec_paths_to_include).flatten.compact
               end
             end
-            generator = Generator::CopyResourcesScript.new(resource_paths_by_config, target.platform)
-            update_changed_file(generator, path)
-            add_file_to_support_group(path)
+            unless resource_paths_by_config.each_value.all?(&:empty?)
+              generator = Generator::CopyResourcesScript.new(resource_paths_by_config, target.platform)
+              update_changed_file(generator, path)
+              add_file_to_support_group(path)
+            end
           end
 
           # Creates a script that embeds the frameworks to the bundle of the app target.
@@ -692,17 +762,19 @@ module Pod
           #
           def create_app_target_embed_frameworks_script(app_spec)
             path = target.embed_frameworks_script_path_for_spec(app_spec)
-            pod_targets = target.dependent_targets_for_app_spec(app_spec)
-            framework_paths_by_config = target.user_build_configurations.keys.each_with_object({}) do |config, paths_by_config|
-              paths_by_config[config] = pod_targets.flat_map do |pod_target|
+            framework_paths_by_config = target.user_build_configurations.each_with_object({}) do |(config_name, config), paths_by_config|
+              pod_targets = target.dependent_targets_for_app_spec(app_spec, :configuration => config)
+              paths_by_config[config_name] = pod_targets.flat_map do |pod_target|
                 spec_paths_to_include = pod_target.library_specs.map(&:name)
                 spec_paths_to_include << app_spec.name if pod_target == target
                 pod_target.framework_paths.values_at(*spec_paths_to_include).flatten.compact.uniq
               end
             end
-            generator = Generator::EmbedFrameworksScript.new(framework_paths_by_config)
-            update_changed_file(generator, path)
-            add_file_to_support_group(path)
+            unless framework_paths_by_config.each_value.all?(&:empty?)
+              generator = Generator::EmbedFrameworksScript.new(framework_paths_by_config)
+              update_changed_file(generator, path)
+              add_file_to_support_group(path)
+            end
           end
 
           # Manually add `libswiftSwiftOnoneSupport.dylib` as it seems there is an issue with tests that do not include it for Debug configurations.
@@ -730,13 +802,21 @@ module Pod
           # @return [void]
           #
           def create_build_phase_to_symlink_header_folders(native_target)
-            return unless target.platform.name == :osx && header_mappings_dir
+            return unless target.platform.name == :osx && any_header_mapping_dirs?
 
             build_phase = native_target.new_shell_script_build_phase('Create Symlinks to Header Folders')
             build_phase.shell_script = <<-eos.strip_heredoc
-          base="$CONFIGURATION_BUILD_DIR/$WRAPPER_NAME"
-          ln -fs "$base/${PUBLIC_HEADERS_FOLDER_PATH\#$WRAPPER_NAME/}" "$base/${PUBLIC_HEADERS_FOLDER_PATH\#\$CONTENTS_FOLDER_PATH/}"
-          ln -fs "$base/${PRIVATE_HEADERS_FOLDER_PATH\#\$WRAPPER_NAME/}" "$base/${PRIVATE_HEADERS_FOLDER_PATH\#\$CONTENTS_FOLDER_PATH/}"
+              cd "$CONFIGURATION_BUILD_DIR/$WRAPPER_NAME" || exit 1
+
+              public_path="${PUBLIC_HEADERS_FOLDER_PATH\#\$CONTENTS_FOLDER_PATH/}"
+              if [ ! -f "$public_path" ]; then
+                ln -fs "${PUBLIC_HEADERS_FOLDER_PATH\#$WRAPPER_NAME/}" "$public_path"
+              fi
+
+              private_path="${PRIVATE_HEADERS_FOLDER_PATH\#\$CONTENTS_FOLDER_PATH/}"
+              if [ ! -f "$private_path" ]; then
+                ln -fs "${PRIVATE_HEADERS_FOLDER_PATH\#\$WRAPPER_NAME/}" "$private_path"
+              fi
             eos
           end
 
@@ -780,11 +860,17 @@ module Pod
           #         The consumer for the specification for which the compiler flags
           #         are needed.
           #
+          # @param  [Boolean] arc
+          #         Whether the arc is enabled or not.
+          #
+          # @param  [Symbol] language
+          #         The language these compiler warnings are for. Can be either :objc or :swift.
+          #
           # @return [String] The compiler flags.
           #
-          def compiler_flags_for_consumer(consumer, arc)
+          def compiler_flags_for_consumer(consumer, arc, language)
             flags = consumer.compiler_flags.dup
-            if !arc
+            if !arc && language == :objc
               flags << '-fno-objc-arc'
             else
               platform_name = consumer.platform_name
@@ -793,15 +879,16 @@ module Pod
                 flags << '-DOS_OBJECT_USE_OBJC=0'
               end
             end
-            if target.inhibit_warnings?
+            if target.inhibit_warnings? && language == :objc
               flags << '-w -Xanalyzer -analyzer-disable-all-checks'
             end
             flags * ' '
           end
 
-          def apply_xcconfig_file_ref_to_targets(targets, xcconfig_file_ref)
+          def apply_xcconfig_file_ref_to_targets(targets, xcconfig_file_ref, configurations)
             targets.each do |config_target|
               config_target.build_configurations.each do |configuration|
+                next unless configurations.include?(configuration.name)
                 configuration.base_configuration_reference = xcconfig_file_ref
               end
             end
@@ -856,20 +943,25 @@ module Pod
           def project_file_references_array(files, file_type)
             files.map do |sf|
               project.reference_for_path(sf).tap do |ref|
-                raise Informative, "Unable to find #{file_type} ref for #{sf} for target #{target.name}." unless ref
+                raise Informative, "Unable to find #{file_type} ref for `#{sf.basename}` for target `#{target.name}`." unless ref
               end
             end
           end
 
-          def header_mappings_dir
-            return @header_mappings_dir if defined?(@header_mappings_dir)
-            file_accessor = target.file_accessors.first
-            @header_mappings_dir = if dir = file_accessor.spec_consumer.header_mappings_dir
-                                     file_accessor.path_list.root + dir
-                                   end
+          def any_header_mapping_dirs?
+            return @any_header_mapping_dirs if defined?(@any_header_mapping_dirs)
+            @any_header_mapping_dirs = target.file_accessors.any? { |fa| fa.spec_consumer.header_mappings_dir }
           end
 
-          def add_header(build_file, public_headers, private_headers, native_target)
+          def header_mappings_dir(file_accessor)
+            @header_mappings_dirs ||= {}
+            return @header_mappings_dirs[file_accessor] if @header_mappings_dirs.key?(file_accessor)
+            @header_mappings_dirs[file_accessor] = if dir = file_accessor.spec_consumer.header_mappings_dir
+                                                     file_accessor.path_list.root + dir
+                                                   end
+          end
+
+          def add_header(file_accessor, build_file, public_headers, private_headers, native_target)
             file_ref = build_file.file_ref
             acl = if !target.build_as_framework? # Headers are already rooted at ${PODS_ROOT}/Headers/P*/[pod]/...
                     'Project'
@@ -881,12 +973,20 @@ module Pod
                     'Project'
                   end
 
-            if target.build_as_framework? && header_mappings_dir && acl != 'Project'
-              relative_path = file_ref.real_path.relative_path_from(header_mappings_dir)
+            if target.build_as_framework? && !header_mappings_dir(file_accessor).nil? && acl != 'Project'
+              relative_path = if mapping_dir = header_mappings_dir(file_accessor)
+                                file_ref.real_path.relative_path_from(mapping_dir)
+                              else
+                                file_ref.real_path.relative_path_from(file_accessor.path_list.root)
+                              end
+              compile_build_phase_index = native_target.build_phases.index do |bp|
+                bp.is_a?(Xcodeproj::Project::Object::PBXSourcesBuildPhase)
+              end
               sub_dir = relative_path.dirname
               copy_phase_name = "Copy #{sub_dir} #{acl} Headers"
               copy_phase = native_target.copy_files_build_phases.find { |bp| bp.name == copy_phase_name } ||
                 native_target.new_copy_files_build_phase(copy_phase_name)
+              native_target.build_phases.move(copy_phase, compile_build_phase_index - 1) unless compile_build_phase_index.nil?
               copy_phase.symbol_dst_subfolder_spec = :products_directory
               copy_phase.dst_path = "$(#{acl.upcase}_HEADERS_FOLDER_PATH)/#{sub_dir}"
               copy_phase.add_file_reference(file_ref, true)
@@ -984,6 +1084,18 @@ module Pod
             end
           end
 
+          # Raises if a vendored xcframework contains frameworks of mixed linkage
+          #
+          def validate_xcframeworks_no_mixed_linkage
+            target.xcframeworks.each_value do |xcframeworks|
+              xcframeworks.each do |xcframework|
+                dynamic_slices, static_slices = xcframework.slices.partition { |slice| Pod::Xcode::LinkageAnalyzer.dynamic_binary?(slice.path) }
+                if !dynamic_slices.empty? && !static_slices.empty?
+                  raise Informative, "Unable to install vendored xcframework `#{xcframework.name}` for Pod `#{target.label}`, because it contains both static and dynamic frameworks."
+                end
+              end
+            end
+          end
           #-----------------------------------------------------------------------#
         end
       end

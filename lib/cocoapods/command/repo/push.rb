@@ -25,19 +25,18 @@ module Pod
             ['--allow-warnings', 'Allows pushing even if there are warnings'],
             ['--use-libraries', 'Linter uses static libraries to install the spec'],
             ['--use-modular-headers', 'Lint uses modular headers during installation'],
-            ['--sources=https://github.com/artsy/Specs,master', 'The sources from which to pull dependent pods ' \
-             '(defaults to all available repos). ' \
-             'Multiple sources must be comma-delimited.'],
+            ["--sources=#{Pod::TrunkSource::TRUNK_REPO_URL}", 'The sources from which to pull dependent pods ' \
+             '(defaults to all available repos). Multiple sources must be comma-delimited'],
             ['--local-only', 'Does not perform the step of pushing REPO to its remote'],
             ['--no-private', 'Lint includes checks that apply only to public repos'],
             ['--skip-import-validation', 'Lint skips validating that the pod can be imported'],
             ['--skip-tests', 'Lint skips building and running tests during validation'],
-            ['--commit-message="Fix bug in pod"', 'Add custom commit message. ' \
-            'Opens default editor if no commit message is specified.'],
-            ['--use-json', 'Push JSON spec to repo'],
-            ['--swift-version=VERSION', 'The SWIFT_VERSION that should be used when linting the spec. ' \
-             'This takes precedence over the Swift versions specified by the spec or a `.swift-version` file.'],
-            ['--no-overwrite', 'Disallow pushing that would overwrite an existing spec.'],
+            ['--commit-message="Fix bug in pod"', 'Add custom commit message. Opens default editor if no commit ' \
+              'message is specified'],
+            ['--use-json', 'Convert the podspec to JSON before pushing it to the repo'],
+            ['--swift-version=VERSION', 'The `SWIFT_VERSION` that should be used when linting the spec. ' \
+             'This takes precedence over the Swift versions specified by the spec or a `.swift-version` file'],
+            ['--no-overwrite', 'Disallow pushing that would overwrite an existing spec'],
           ].concat(super)
         end
 
@@ -73,7 +72,7 @@ module Pod
 
         def run
           open_editor if @commit_message && @message.nil?
-          check_if_master_repo
+          check_if_push_allowed
           validate_podspec_files
           check_repo_status
           update_repo
@@ -106,7 +105,11 @@ module Pod
         # Temporary check to ensure that users do not push accidentally private
         # specs to the master repo.
         #
-        def check_if_master_repo
+        def check_if_push_allowed
+          if @source.is_a?(CDNSource)
+            raise Informative, 'Cannot push to a CDN source, as it is read-only.'
+          end
+
           remotes, = Executable.capture_command('git', %w(remote --verbose), :capture => :merge, :chdir => repo_dir)
           master_repo_urls = [
             'git@github.com:CocoaPods/Specs.git',
@@ -227,7 +230,7 @@ module Pod
         #
         def push_repo
           UI.puts "\nPushing the `#{@repo}' repo\n".yellow
-          repo_git('push', 'origin', 'master')
+          repo_git('push', 'origin', 'HEAD')
         end
 
         #---------------------------------------------------------------------#

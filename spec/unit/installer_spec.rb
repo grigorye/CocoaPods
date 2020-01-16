@@ -15,9 +15,9 @@ end
 
 # @return [Podfile]
 #
-def generate_podfile(pods = ['JSONKit'])
+def generate_podfile(pods = ['DfPodTest'])
   Pod::Podfile.new do
-    platform :ios
+    platform :ios, 8.0
     install! 'cocoapods', :integrate_targets => false
     project SpecHelper.fixture('SampleProject/SampleProject'), 'Test' => :debug, 'App Store' => :release
     target 'SampleProject' do
@@ -71,7 +71,12 @@ module Pod
         @installer.stubs(:perform_post_install_actions)
         @installer.stubs(:predictabilize_uuids)
         @installer.stubs(:stabilize_target_uuids)
-
+        podfile_dependency_cache = Installer::Analyzer::PodfileDependencyCache.from_podfile(@installer.podfile)
+        @analysis_result = Installer::Analyzer::AnalysisResult.new(Pod::Installer::Analyzer::SpecsState.new, {}, {},
+                                                                   [fixture_spec('banana-lib/BananaLib.podspec')],
+                                                                   Pod::Installer::Analyzer::SpecsState.new, [], [],
+                                                                   podfile_dependency_cache)
+        @installer.stubs(:analysis_result).returns(@analysis_result)
         Installer::Xcode::PodsProjectGenerator.any_instance.stubs(:configure_schemes)
         Installer::Xcode::SinglePodsProjectGenerator.any_instance.stubs(:generate!)
         Installer::Xcode::PodsProjectWriter.any_instance.stubs(:write!)
@@ -106,10 +111,11 @@ module Pod
         generator_result = Installer::Xcode::PodsProjectGenerator::PodsProjectGeneratorResult.new(nil, {}, target_installation_results)
         generator.stubs(:generate!).returns(generator_result)
         generator.stubs(:configure_schemes)
+        Installer::Xcode::PodsProjectWriter.any_instance.unstub(:write!)
 
         hooks = sequence('hooks')
         @installer.expects(:run_podfile_post_install_hooks).once.in_sequence(hooks)
-        Installer::Xcode::PodsProjectWriter.any_instance.expects(:write!).once.in_sequence(hooks)
+        Installer::Xcode::PodsProjectWriter.any_instance.expects(:save_projects).once.in_sequence(hooks)
 
         @installer.install!
       end
@@ -273,6 +279,34 @@ module Pod
         end
       end
 
+      it 'installs Pods from plugin sources' do
+        path = fixture('SampleProject/SampleProject')
+        podfile = Podfile.new do
+          install! 'cocoapods', :integrate_targets => false
+          project path
+
+          plugin 'my-plugin'
+
+          target 'SampleProject' do
+            platform :ios, '10.0'
+            pod 'CoconutLib'
+            pod 'monkey'
+          end
+        end
+        podfile.stubs(:plugins).returns('my-plugin' => {})
+
+        plugin_source = Pod::Source.new(fixture('spec-repos/test_repo'))
+
+        Pod::HooksManager.register('my-plugin', :source_provider) do |context, _|
+          context.add_source(plugin_source)
+        end
+
+        @installer = Installer.new(config.sandbox, podfile, generate_lockfile)
+        @installer.stubs(:ensure_plugins_are_installed!)
+        @installer.resolve_dependencies
+        @installer.analysis_result.pod_targets.map(&:name).sort.should == %w(CoconutLib monkey)
+      end
+
       it 'integrates the user targets if the corresponding config is set' do
         @installer.stubs(:installation_options).returns(Pod::Installer::InstallationOptions.new(:integrate_targets => true))
         @installer.expects(:integrate_user_project)
@@ -284,6 +318,27 @@ module Pod
         @installer.expects(:integrate_user_project).never
         @installer.install!
         UI.output.should.include 'Skipping User Project Integration'
+      end
+
+      it "doesn't generate Pods.xcodeproj if skip_pods_project_generation is true" do
+        @installer.stubs(:installation_options).returns(Pod::Installer::InstallationOptions.new(:skip_pods_project_generation => true))
+        @installer.expects(:integrate).never
+        @installer.install!
+        UI.output.should.include 'Skipping Pods Project Creation'
+        UI.output.should.include 'Skipping User Project Integration'
+      end
+
+      it 'generates Pods.xcodeproj if skip_pods_project_generation is not set' do
+        @installer.stubs(:installation_options).returns(Pod::Installer::InstallationOptions.new)
+        @installer.expects(:integrate).once
+        @installer.install!
+      end
+
+      it 'always writes lockfile even if project generation and integration is false' do
+        installation_options = Pod::Installer::InstallationOptions.new(:skip_pods_project_generation => true, :integrate_targets => false)
+        @installer.stubs(:installation_options).returns(installation_options)
+        @installer.expects(:write_lockfiles)
+        @installer.install!
       end
 
       it 'prints a list of deprecated pods' do
@@ -399,7 +454,7 @@ module Pod
         it 'updates the repositories if that was requested' do
           FileUtils.mkdir_p(config.sandbox.target_support_files_root)
           @installer.repo_update = true
-          config.sources_manager.expects(:update).once
+          Source::Manager.any_instance.expects(:update).once
           @installer.send(:resolve_dependencies)
         end
 
@@ -422,13 +477,13 @@ module Pod
 
         it 'analyzes the Podfile, the Lockfile and the Sandbox' do
           @installer.send(:analyze)
-          @installer.analysis_result.sandbox_state.added.should == Set.new(%w(JSONKit))
+          @installer.analysis_result.sandbox_state.added.should == Set.new(%w(DfPodTest FMDB))
         end
 
         it 'stores the targets created by the analyzer' do
           @installer.send(:analyze)
           @installer.aggregate_targets.map(&:name).sort.should == ['Pods-SampleProject', 'Pods-SampleProjectTests']
-          @installer.pod_targets.map(&:name).sort.should == ['JSONKit']
+          @installer.pod_targets.map(&:name).sort.should == %w(DfPodTest FMDB)
         end
 
         it 'configures the analyzer to use update mode if appropriate' do
@@ -443,7 +498,7 @@ module Pod
       describe '#validate_whitelisted_configurations' do
         it "raises when a whitelisted configuration doesn’t exist in the user's project" do
           target_definition = @installer.podfile.target_definitions.values.first
-          target_definition.whitelist_pod_for_configuration('JSONKit', 'YOLO')
+          target_definition.whitelist_pod_for_configuration('DfPodTest', 'YOLO')
           @installer.send(:analyze)
           should.raise Informative do
             @installer.send(:validate_build_configurations)
@@ -452,7 +507,7 @@ module Pod
 
         it "does not raise if all whitelisted configurations exist in the user's project" do
           target_definition = @installer.podfile.target_definitions.values.first
-          target_definition.whitelist_pod_for_configuration('JSONKit', 'Test')
+          target_definition.whitelist_pod_for_configuration('DfPodTest', 'Test')
           @installer.send(:analyze)
           should.not.raise do
             @installer.send(:validate_build_configurations)
@@ -473,7 +528,7 @@ module Pod
           @spec.stubs(:root => @spec)
           @spec.stubs(:spec_type).returns(:library)
           @spec.stubs(:module_name => 'Spec')
-          @pod_targets = [PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@spec],
+          @pod_targets = [PodTarget.new(config.sandbox, BuildType.static_library, {}, [], Platform.ios, [@spec],
                                         [fixture_target_definition], nil)]
           @installer.stubs(:analysis_result).returns(@analysis_result)
           @installer.stubs(:pod_targets).returns(@pod_targets)
@@ -518,7 +573,7 @@ module Pod
 
         it 'correctly configures the Pod source installer' do
           spec = fixture_spec('banana-lib/BananaLib.podspec')
-          pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [spec], [fixture_target_definition],
+          pod_target = PodTarget.new(config.sandbox, BuildType.static_library, {}, [], Platform.ios, [spec], [fixture_target_definition],
                                      nil)
           pod_target.stubs(:platform).returns(:ios)
           @installer.stubs(:pod_targets).returns([pod_target])
@@ -529,7 +584,7 @@ module Pod
 
         it 'maintains the list of the installed specs' do
           spec = fixture_spec('banana-lib/BananaLib.podspec')
-          pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [spec], [fixture_target_definition],
+          pod_target = PodTarget.new(config.sandbox, BuildType.static_library, {}, [], Platform.ios, [spec], [fixture_target_definition],
                                      nil)
           pod_target.stubs(:platform).returns(:ios)
           @installer.stubs(:pod_targets).returns([pod_target, pod_target])
@@ -633,7 +688,7 @@ module Pod
             ]
             @pod_targets = targets.map do |(name, platform, target_spec)|
               target_definition = fixture_target_definition(name, platform)
-              PodTarget.new(config.sandbox, false, {}, [], platform, [target_spec], [target_definition], nil)
+              PodTarget.new(config.sandbox, BuildType.static_library, {}, [], platform, [target_spec], [target_definition], nil)
             end
             @installer.stubs(:pod_targets).returns(@pod_targets)
             @installer.send(:specs_for_pod, 'matryoshka').should == {
@@ -653,7 +708,7 @@ module Pod
           ]
           @pod_targets = targets.map do |(name, platform, target_spec)|
             target_definition = fixture_target_definition(name, platform)
-            PodTarget.new(config.sandbox, false, {}, [], platform, [target_spec], [target_definition], nil)
+            PodTarget.new(config.sandbox, BuildType.static_library, {}, [], platform, [target_spec], [target_definition], nil)
           end
           @installer.stubs(:pod_targets).returns(@pod_targets)
           pod_installer = @installer.send(:create_pod_installer, 'matryoshka')
@@ -667,7 +722,7 @@ module Pod
 
         it 'raises when it attempts to install pod source with no target supporting it' do
           spec = fixture_spec('banana-lib/BananaLib.podspec')
-          pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [spec], [fixture_target_definition],
+          pod_target = PodTarget.new(config.sandbox, BuildType.static_library, {}, [], Platform.ios, [spec], [fixture_target_definition],
                                      nil)
           pod_target.stubs(:platform).returns(:ios)
           @installer.stubs(:pod_targets).returns([pod_target])
@@ -679,7 +734,7 @@ module Pod
         it 'prints a warning for installed pods that included script phases' do
           spec = fixture_spec('coconut-lib/CoconutLib.podspec')
           spec.test_specs.first.script_phase = { :name => 'Hello World', :script => 'echo "Hello World"' }
-          pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [spec, *spec.test_specs],
+          pod_target = PodTarget.new(config.sandbox, BuildType.static_library, {}, [], Platform.ios, [spec, *spec.test_specs],
                                      [fixture_target_definition], nil)
           pod_target.stubs(:platform).returns(:ios)
           sandbox_state = Installer::Analyzer::SpecsState.new
@@ -695,7 +750,7 @@ module Pod
         it 'does not print a warning for already installed pods that include script phases' do
           spec = fixture_spec('coconut-lib/CoconutLib.podspec')
           spec.test_specs.first.script_phase = { :name => 'Hello World', :script => 'echo "Hello World"' }
-          pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [spec, *spec.test_specs],
+          pod_target = PodTarget.new(config.sandbox, BuildType.static_library, {}, [], Platform.ios, [spec, *spec.test_specs],
                                      [fixture_target_definition], nil)
           pod_target.stubs(:platform).returns(:ios)
           sandbox_state = Installer::Analyzer::SpecsState.new
@@ -757,7 +812,7 @@ module Pod
 
     describe 'Integrating client projects' do
       it 'integrates the client projects' do
-        target = AggregateTarget.new(config.sandbox, false, {}, [], Platform.ios, fixture_target_definition,
+        target = AggregateTarget.new(config.sandbox, BuildType.static_library, {}, [], Platform.ios, fixture_target_definition,
                                      config.sandbox.root.dirname, nil, nil, {})
         @installer.stubs(:aggregate_targets).returns([target])
         Installer::UserProjectIntegrator.any_instance.expects(:integrate!)
@@ -769,7 +824,7 @@ module Pod
       before do
         @installer.send(:analyze)
         @specs = @installer.pod_targets.map(&:specs).flatten
-        @spec = @specs.find { |spec| spec && spec.name == 'JSONKit' }
+        @spec = @specs.find { |spec| spec && spec.name == 'DfPodTest' }
         @installer.stubs(:installed_specs).returns(@specs)
       end
 
@@ -900,7 +955,7 @@ module Pod
         end.message.should.include 'The `Pods` directory is out-of-date, you must run `pod install`'
       end
 
-      it 'returns the aggregate targets without performing installation' do
+      it 'returns the aggregate targets without performing installation with trunk pod' do
         podfile = generate_podfile
         lockfile = generate_lockfile
 
@@ -917,13 +972,13 @@ module Pod
 
         aggregate_targets.last.pod_targets.should == []
         sample_project_target = aggregate_targets.first
-        sample_project_target.pod_targets.map(&:label).should == %w(JSONKit)
+        sample_project_target.pod_targets.map(&:label).should == %w(DfPodTest FMDB)
 
-        jsonkit = sample_project_target.pod_targets.first
+        dfpodtest = sample_project_target.pod_targets.first
 
-        jsonkit.sandbox.should == config.sandbox
-        jsonkit.file_accessors.flat_map(&:root).should == [config.sandbox.pod_dir('JSONKit')]
-        jsonkit.archs.should == []
+        dfpodtest.sandbox.should == config.sandbox
+        dfpodtest.file_accessors.flat_map(&:root).should == [config.sandbox.pod_dir('DfPodTest')]
+        dfpodtest.archs.should == []
       end
 
       it 'returns the aggregate targets without performing installation with local pods' do
@@ -946,11 +1001,11 @@ module Pod
         sample_project_target = aggregate_targets.first
         sample_project_target.pod_targets.map(&:label).should == %w(Reachability)
 
-        jsonkit = sample_project_target.pod_targets.first
+        dfpodtest = sample_project_target.pod_targets.first
 
-        jsonkit.sandbox.should == config.sandbox
-        jsonkit.file_accessors.flat_map(&:root).should == [config.sandbox.pod_dir('Reachability')]
-        jsonkit.archs.should == []
+        dfpodtest.sandbox.should == config.sandbox
+        dfpodtest.file_accessors.flat_map(&:root).should == [config.sandbox.pod_dir('Reachability')]
+        dfpodtest.archs.should == []
       end
     end
   end

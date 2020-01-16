@@ -9,7 +9,7 @@ module Pod
         end
 
         def pod_target(spec, target_definition)
-          fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [target_definition])
+          fixture_pod_target(spec, BuildType.static_library, { 'Release' => :release }, [], Platform.new(:ios, '6.0'), [target_definition])
         end
 
         before do
@@ -18,11 +18,12 @@ module Pod
           @specs.first.user_target_xcconfig = { 'OTHER_LDFLAGS' => '-no_compact_unwind', 'USE_HEADERMAP' => 'NO' } unless @specs.empty?
           @specs.first.pod_target_xcconfig = { 'CLANG_CXX_LANGUAGE_STANDARD' => 'c++11' } unless @specs.empty?
           @pod_targets = @specs.map { |spec| pod_target(spec, @target_definition) }
-          @target = fixture_aggregate_target(@pod_targets, false, { 'Release' => :release }, [], Platform.new(:ios, '6.0'), @target_definition)
+          @target = fixture_aggregate_target(@pod_targets, BuildType.static_library, { 'Release' => :release }, [],
+                                             Platform.new(:ios, '6.0'), @target_definition)
           unless @specs.empty?
             @target.target_definition.whitelist_pod_for_configuration(@specs.first.name, 'Release')
           end
-          @generator = AggregateTargetSettings.new(@target, 'Release')
+          @generator = AggregateTargetSettings.new(@target, 'Release', :configuration => :release)
         end
 
         shared 'Aggregate' do
@@ -152,7 +153,8 @@ module Pod
 
           describe 'with a pod target inhibiting warnings' do
             def pod_target(spec, target_definition)
-              fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [target_definition]).tap { |pt| pt.stubs(:inhibit_warnings? => true) }
+              fixture_pod_target(spec, BuildType.static_library, { 'Debug' => :debug, 'Release' => :release }, [], Platform.new(:ios, '6.0'),
+                                 [target_definition]).tap { |pt| pt.stubs(:inhibit_warnings? => true) }
             end
 
             it 'adds the sandbox public headers search paths to the xcconfig, with quotes, as system headers' do
@@ -163,7 +165,8 @@ module Pod
 
           describe 'with pod targets that define modules' do
             def pod_target(spec, target_definition)
-              fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [target_definition]).tap { |pt| pt.stubs(:defines_module? => true) }
+              fixture_pod_target(spec, BuildType.static_library, { 'Debug' => :debug, 'Release' => :release }, [], Platform.new(:ios, '6.0'),
+                                 [target_definition]).tap { |pt| pt.stubs(:defines_module? => true) }
             end
 
             it 'adds the dependent pods module map file to OTHER_CFLAGS' do
@@ -183,7 +186,7 @@ module Pod
 
           describe 'with a scoped pod target' do
             def pod_target(spec, target_definition)
-              fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [target_definition]).scoped.first
+              fixture_pod_target(spec, BuildType.static_library, { 'Debug' => :debug, 'Release' => :release }, [], Platform.new(:ios, '6.0'), [target_definition]).scoped.first
             end
 
             it 'links the pod targets with the aggregate target' do
@@ -198,7 +201,7 @@ module Pod
           end
 
           it 'does not links the pod targets with the aggregate target for non-whitelisted configuration' do
-            @generator = AggregateTargetSettings.new(@target, 'Debug')
+            @generator = AggregateTargetSettings.new(@target, 'Debug', :configuration => :debug)
             @xcconfig = @generator.dup.generate
             @xcconfig.to_hash['OTHER_LDFLAGS'].should.be.nil
           end
@@ -219,6 +222,7 @@ module Pod
                                  :vendored_static_libraries => [config.sandbox.root + 'StaticLibrary.a'],
                                  :vendored_dynamic_frameworks => [config.sandbox.root + 'VendoredFramework.framework'],
                                  :vendored_dynamic_libraries => [config.sandbox.root + 'VendoredDyld.dyld'],
+                                 :vendored_xcframeworks => [],
                                 )
             file_accessor.stubs(:vendored_frameworks => file_accessor.vendored_static_frameworks + file_accessor.vendored_dynamic_frameworks,
                                 :vendored_dynamic_artifacts => file_accessor.vendored_dynamic_frameworks + file_accessor.vendored_dynamic_libraries)
@@ -242,10 +246,11 @@ module Pod
                               :build_product_path => 'BPP',
                               :product_basename => 'PodTarget',
                               :target_definitions => [target_definition],
+                              :root_spec => spec,
                              )
-            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target))
+            pod_target.stubs(:build_settings_for_spec => PodTargetSettings.new(pod_target, nil, :configuration => :release))
             aggregate_target = fixture_aggregate_target([pod_target])
-            @generator = AggregateTargetSettings.new(aggregate_target, 'Release')
+            @generator = AggregateTargetSettings.new(aggregate_target, 'Release', :configuration => :release)
             @generator.other_ldflags.should == %w(-ObjC -l"PodTarget" -l"StaticLibrary" -l"VendoredDyld" -l"xml2" -framework "StaticFramework" -framework "VendoredFramework" -framework "XCTest")
           end
         end
@@ -256,7 +261,7 @@ module Pod
           end
 
           before do
-            Target.any_instance.stubs(:build_type).returns(Target::BuildType.dynamic_framework)
+            Target.any_instance.stubs(:build_type).returns(BuildType.dynamic_framework)
           end
 
           behaves_like 'Aggregate'
@@ -308,7 +313,7 @@ module Pod
             end
 
             it 'includes default runpath search path list when not using frameworks but links a vendored dynamic framework' do
-              @target.stubs(:build_type => Target::BuildType.static_library)
+              @target.stubs(:build_type => BuildType.static_library)
               @generator.generate.to_hash['LD_RUNPATH_SEARCH_PATHS'].should == "$(inherited) '@executable_path/Frameworks' '@loader_path/Frameworks'"
             end
           end
@@ -324,7 +329,7 @@ module Pod
             def pod_target(spec, target_definition)
               target_definition = fixture_target_definition(spec.name)
               target_definition.stubs(:parent).returns(@target_definition.podfile)
-              fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [@target_definition], 'iOS')
+              fixture_pod_target(spec, BuildType.static_library, { 'Release' => :release }, [], Platform.new(:ios, '6.0'), [@target_definition], 'iOS')
             end
 
             it 'adds the framework build path to the xcconfig, with quotes, as framework search paths' do
@@ -350,7 +355,7 @@ module Pod
 
           describe 'with a pod target inhibiting warnings' do
             def pod_target(spec, target_definition)
-              fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [target_definition]).tap { |pt| pt.stubs(:inhibit_warnings? => true) }
+              fixture_pod_target(spec, BuildType.static_library, { 'Release' => :release }, [], Platform.new(:ios, '6.0'), [target_definition]).tap { |pt| pt.stubs(:inhibit_warnings? => true) }
             end
 
             it 'adds the framework build path to the xcconfig, with quotes, as system framework search paths' do
@@ -465,6 +470,7 @@ module Pod
                                  :vendored_static_libraries => [config.sandbox.root + 'StaticLibrary.a'],
                                  :vendored_dynamic_frameworks => [config.sandbox.root + 'VendoredFramework.framework'],
                                  :vendored_dynamic_libraries => [config.sandbox.root + 'VendoredDyld.dyld'],
+                                 :vendored_xcframeworks => [],
                                 )
             file_accessor.stubs(:vendored_frameworks => file_accessor.vendored_static_frameworks + file_accessor.vendored_dynamic_frameworks,
                                 :vendored_dynamic_artifacts => file_accessor.vendored_dynamic_frameworks + file_accessor.vendored_dynamic_libraries,
@@ -489,10 +495,11 @@ module Pod
                               :build_product_path => 'BPP',
                               :product_basename => 'PodTarget',
                               :target_definitions => [target_definition],
+                              :root_spec => spec,
                              )
-            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target))
+            pod_target.stubs(:build_settings_for_spec => PodTargetSettings.new(pod_target, nil, :configuration => :release))
             aggregate_target = fixture_aggregate_target([pod_target])
-            @generator = AggregateTargetSettings.new(aggregate_target, 'Release')
+            @generator = AggregateTargetSettings.new(aggregate_target, 'Release', :configuration => :release)
             @generator.other_ldflags.should == %w(-ObjC -l"VendoredDyld" -l"xml2" -framework "PodTarget" -framework "VendoredFramework" -framework "XCTest")
           end
 
@@ -512,6 +519,7 @@ module Pod
                                  :vendored_static_libraries => [config.sandbox.root + 'StaticLibrary.a'],
                                  :vendored_dynamic_frameworks => [config.sandbox.root + 'VendoredFramework.framework'],
                                  :vendored_dynamic_libraries => [config.sandbox.root + 'VendoredDyld.dyld'],
+                                 :vendored_xcframeworks => [],
                                 )
             file_accessor.stubs(:vendored_frameworks => file_accessor.vendored_static_frameworks + file_accessor.vendored_dynamic_frameworks,
                                 :vendored_dynamic_artifacts => file_accessor.vendored_dynamic_frameworks + file_accessor.vendored_dynamic_libraries,
@@ -536,10 +544,11 @@ module Pod
                               :build_product_path => 'BPP',
                               :product_basename => 'PodTarget',
                               :target_definitions => [target_definition],
+                              :root_spec => spec,
                              )
-            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target))
+            pod_target.stubs(:build_settings_for_spec => PodTargetSettings.new(pod_target, nil, :configuration => :release))
             aggregate_target = fixture_aggregate_target([pod_target])
-            @generator = AggregateTargetSettings.new(aggregate_target, 'Release')
+            @generator = AggregateTargetSettings.new(aggregate_target, 'Release', :configuration => :release)
             @generator.other_ldflags.should == %w(-ObjC -l"PodTarget" -l"StaticLibrary" -l"VendoredDyld" -l"xml2" -framework "StaticFramework" -framework "VendoredFramework" -framework "XCTest" -weak_framework "iAd")
           end
 
@@ -559,6 +568,7 @@ module Pod
                                  :vendored_static_libraries => [config.sandbox.root + 'StaticLibrary.a'],
                                  :vendored_dynamic_frameworks => [config.sandbox.root + 'VendoredFramework.framework'],
                                  :vendored_dynamic_libraries => [config.sandbox.root + 'VendoredDyld.dyld'],
+                                 :vendored_xcframeworks => [],
                                 )
             file_accessor.stubs(:vendored_frameworks => file_accessor.vendored_static_frameworks + file_accessor.vendored_dynamic_frameworks,
                                 :vendored_dynamic_artifacts => file_accessor.vendored_dynamic_frameworks + file_accessor.vendored_dynamic_libraries,
@@ -583,10 +593,11 @@ module Pod
                               :build_product_path => 'BPP',
                               :product_basename => 'PodTarget',
                               :target_definitions => [target_definition],
+                              :root_spec => spec,
                              )
-            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target))
+            pod_target.stubs(:build_settings_for_spec => PodTargetSettings.new(pod_target, :configuration => :release))
             aggregate_target = fixture_aggregate_target([pod_target])
-            @generator = AggregateTargetSettings.new(aggregate_target, 'Release')
+            @generator = AggregateTargetSettings.new(aggregate_target, 'Release', :configuration => :release)
             @generator.other_ldflags.should == %w(-ObjC -l"StaticLibrary" -l"VendoredDyld" -l"xml2" -framework "PodTarget" -framework "StaticFramework" -framework "VendoredFramework" -framework "XCTest")
           end
         end
@@ -706,7 +717,7 @@ module Pod
         describe 'an empty pod target' do
           before do
             @blank_target = fixture_aggregate_target
-            @generator = AggregateTargetSettings.new(@blank_target, 'Release')
+            @generator = AggregateTargetSettings.new(@blank_target, 'Release', :configuration => :release)
           end
 
           it 'it should not have any framework search paths' do

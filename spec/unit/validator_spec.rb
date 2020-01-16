@@ -4,13 +4,11 @@ require 'webmock'
 module Pod
   describe Validator do
     before do
+      # get these in before mock activates
+      podspec_path
+      podspec_path('RestKit', '0.22.0')
       WebMock.enable!
       WebMock.disable_net_connect!
-    end
-
-    after do
-      WebMock.reset!
-      WebMock.disable!
     end
 
     before do
@@ -39,7 +37,7 @@ module Pod
     # @return [Pathname]
     #
     def podspec_path(name = 'JSONKit', version = '1.4')
-      Config.instance.sources_manager.master.first.pod_path(name).join("#{version}/#{name}.podspec.json")
+      Config.instance.sources_manager.master.first.specification_path(name, version)
     end
 
     #-------------------------------------------------------------------------#
@@ -303,13 +301,24 @@ module Pod
         end
       end
 
-      it 'respects the no clean option' do
+      it 'respects the no clean option when set to true' do
         file = write_podspec(stub_podspec)
         validator = Validator.new(file, config.sources_manager.master.map(&:url))
         validator.stubs(:validate_url)
+        validator.stubs(:download_pod)
         validator.no_clean = true
+        validator.expects(:clean!).never
         validator.validate
-        validator.validation_dir.should.exist
+      end
+
+      it 'respects the no clean option when set to false' do
+        file = write_podspec(stub_podspec)
+        validator = Validator.new(file, config.sources_manager.master.map(&:url))
+        validator.stubs(:validate_url)
+        validator.stubs(:download_pod)
+        validator.no_clean = false
+        validator.expects(:clean!).once
+        validator.validate
       end
 
       describe 'Platforms' do
@@ -374,6 +383,7 @@ module Pod
         it 'includes only tests supported on the current platform' do
           file = write_podspec(stub_podspec)
           validator = Validator.new(file, config.sources_manager.master.map(&:url), %w(ios osx))
+          validator.use_frameworks = false
           validator.instance_variable_set(:@results, [])
           subspec = Specification.new(validator.spec, 'Tests', true) do |s|
             s.platform = :ios
@@ -385,13 +395,13 @@ module Pod
           validator.stubs(:install_pod)
           validator.stubs(:add_app_project_import)
           validator.stubs(:test_pod)
-          %i(prepare resolve_dependencies download_dependencies).each do |m|
+          %i(prepare resolve_dependencies download_dependencies write_lockfiles).each do |m|
             Installer.any_instance.stubs(m)
           end
           Installer.any_instance.stubs(:aggregate_targets).returns([])
           Installer.any_instance.stubs(:pod_targets).returns([])
-          validator.expects(:podfile_from_spec).with(:osx, nil, nil, [], nil).once.returns(stub('Podfile'))
-          validator.expects(:podfile_from_spec).with(:ios, nil, nil, ['JSONKit/Tests'], nil).once.returns(stub('Podfile'))
+          validator.expects(:podfile_from_spec).with(:osx, nil, false, [], nil).once.returns(stub('Podfile'))
+          validator.expects(:podfile_from_spec).with(:ios, nil, false, ['JSONKit/Tests'], nil).once.returns(stub('Podfile'))
           validator.validate
         end
 
@@ -451,13 +461,14 @@ module Pod
 
       it 'uses the deployment target of the current subspec' do
         validator = Validator.new(podspec_path, config.sources_manager.master.map(&:url))
+        validator.use_frameworks = false
         validator.instance_variable_set(:@results, [])
         validator.stubs(:validate_url)
         validator.stubs(:validate_screenshots)
         validator.stubs(:check_file_patterns)
         validator.stubs(:install_pod)
         validator.stubs(:add_app_project_import)
-        %i(prepare resolve_dependencies download_dependencies).each do |m|
+        %i(prepare resolve_dependencies download_dependencies write_lockfiles).each do |m|
           Installer.any_instance.stubs(m)
         end
         Installer.any_instance.stubs(:aggregate_targets).returns([])
@@ -466,11 +477,11 @@ module Pod
           s.ios.deployment_target = '7.0'
         end
         validator.spec.stubs(:subspecs).returns([subspec])
-        validator.expects(:podfile_from_spec).with(:osx, nil, nil, [], nil).once.returns(stub('Podfile'))
-        validator.expects(:podfile_from_spec).with(:ios, nil, nil, [], nil).once.returns(stub('Podfile'))
-        validator.expects(:podfile_from_spec).with(:ios, '7.0', nil, [], nil).once.returns(stub('Podfile'))
-        validator.expects(:podfile_from_spec).with(:tvos, nil, nil, [], nil).once.returns(stub('Podfile'))
-        validator.expects(:podfile_from_spec).with(:watchos, nil, nil, [], nil).once.returns(stub('Podfile'))
+        validator.expects(:podfile_from_spec).with(:osx, nil, false, [], nil).once.returns(stub('Podfile'))
+        validator.expects(:podfile_from_spec).with(:ios, nil, false, [], nil).once.returns(stub('Podfile'))
+        validator.expects(:podfile_from_spec).with(:ios, '7.0', false, [], nil).once.returns(stub('Podfile'))
+        validator.expects(:podfile_from_spec).with(:tvos, nil, false, [], nil).once.returns(stub('Podfile'))
+        validator.expects(:podfile_from_spec).with(:watchos, nil, false, [], nil).once.returns(stub('Podfile'))
         validator.send(:perform_extensive_analysis, validator.spec)
 
         validator.results_message.strip.should.be.empty
@@ -519,7 +530,7 @@ module Pod
       end
 
       it 'empties sources when no dependencies' do
-        sources = %w(master https://github.com/CocoaPods/Specs.git)
+        sources = ['trunk', Pod::TrunkSource::TRUNK_REPO_URL]
         Command::Repo::Add.any_instance.stubs(:run)
         validator = Validator.new(podspec_path, sources)
         validator.stubs(:validate_url)
@@ -541,12 +552,12 @@ module Pod
 
         spec = Specification.from_file(file)
 
-        sources = %w(master https://github.com/CocoaPods/Specs.git)
+        sources = ['trunk', Pod::TrunkSource::TRUNK_REPO_URL]
         Command::Repo::Add.any_instance.stubs(:run)
         validator = Validator.new(spec, sources)
         validator.stubs(:validate_url)
         podfile = validator.send(:podfile_from_spec, :ios, '5.0')
-        podfile.sources.should == %w(https://github.com/CocoaPods/Specs.git)
+        podfile.sources.should == [Pod::TrunkSource::TRUNK_REPO_URL]
       end
 
       it 'respects the source_urls parameter when there are dependencies within subspecs' do
@@ -563,16 +574,16 @@ module Pod
 
         spec = Specification.from_file(file)
 
-        sources = %w(master https://github.com/CocoaPods/Specs.git)
+        sources = ['trunk', Pod::TrunkSource::TRUNK_REPO_URL]
         Command::Repo::Add.any_instance.stubs(:run)
         validator = Validator.new(spec, sources)
         validator.stubs(:validate_url)
         podfile = validator.send(:podfile_from_spec, :ios, '5.0')
-        podfile.sources.should == %w(https://github.com/CocoaPods/Specs.git)
+        podfile.sources.should == [Pod::TrunkSource::TRUNK_REPO_URL]
       end
 
       it 'avoids creation of sources when no dependencies' do
-        sources = %w(master https://github.com/CocoaPods/Specs.git)
+        sources = ['trunk', Pod::TrunkSource::TRUNK_REPO_URL]
         config.sources_manager.expects(:find_or_create_source_with_url).never
         Command::Repo::Add.any_instance.stubs(:run)
         validator = Validator.new(podspec_path, sources)
@@ -647,6 +658,37 @@ module Pod
         validator.validate.should == true
       end
 
+      it 'runs xcodebuild with correct arguments when validating with --analyze' do
+        require 'fourflusher'
+        Fourflusher::SimControl.any_instance.stubs(:destination).returns(['-destination', 'id=XXX'])
+        Validator.any_instance.unstub(:xcodebuild)
+        PodTarget.any_instance.stubs(:should_build?).returns(true)
+        Installer::Xcode::PodsProjectGenerator::PodTargetInstaller.any_instance.stubs(:validate_targets_contain_sources) # since we skip downloading
+        validator = Validator.new(podspec_path, config.sources_manager.master.map(&:url))
+        validator.stubs(:check_file_patterns)
+        validator.stubs(:validate_url)
+        validator.analyze = true
+        git = Executable.which(:git)
+        Executable.stubs(:which).with('git').returns(git)
+        Executable.stubs(:capture_command).with('git', ['config', '--get', 'remote.origin.url'], :capture => :out).returns(['https://github.com/CocoaPods/Specs.git'])
+        Executable.stubs(:which).with(:xcrun)
+        Executable.stubs(:execute_command).with('find', [validator.validation_dir, '-name', '*.html'], false).returns('')
+        Executable.expects(:execute_command).with { |executable, command, _| executable == 'git' && command.first == 'clone' }.once
+        # Command should 'analyze' instead of 'build'.
+        command = ['clean', 'analyze', '-workspace', File.join(validator.validation_dir, 'App.xcworkspace'), '-scheme', 'App', '-configuration', 'Release']
+        args = %w(CODE_SIGN_IDENTITY=)
+        analyzer_args = %w(CLANG_ANALYZER_OUTPUT=html)
+        analyzer_args += %w(CLANG_ANALYZER_OUTPUT_DIR=analyzer)
+        Executable.expects(:execute_command).with('xcodebuild', command + args + analyzer_args, true).once.returns('')
+        args = %w(CODE_SIGN_IDENTITY=- -sdk appletvsimulator) + Fourflusher::SimControl.new.destination('Apple TV 1080p') + analyzer_args
+        Executable.expects(:execute_command).with('xcodebuild', command + args, true).once.returns('')
+        args = %w(CODE_SIGN_IDENTITY=- -sdk iphonesimulator) + Fourflusher::SimControl.new.destination('iPhone 4s') + analyzer_args
+        Executable.expects(:execute_command).with('xcodebuild', command + args, true).once.returns('')
+        args = %w(CODE_SIGN_IDENTITY=- -sdk watchsimulator) + Fourflusher::SimControl.new.destination('Apple Watch - 38mm') + analyzer_args
+        Executable.expects(:execute_command).with('xcodebuild', command + args, true).once.returns('')
+        validator.validate.should == true
+      end
+
       it 'runs xcodebuild with correct arguments for code signing' do
         require 'fourflusher'
         Fourflusher::SimControl.any_instance.stubs(:destination).returns(['-destination', 'id=XXX'])
@@ -717,6 +759,7 @@ module Pod
         end
 
         it 'creates an empty app project & target to integrate into' do
+          @validator.use_frameworks = false
           @validator.send(:create_app_project)
           project = Xcodeproj::Project.open(@validator.validation_dir + 'App.xcodeproj')
 
@@ -736,8 +779,7 @@ module Pod
           app_project_path = @validator.validation_dir + 'App.xcodeproj'
           pod_target = fixture_pod_target('banana-lib/BananaLib.podspec')
           pod_target.stubs(:uses_swift? => true, :pod_name => 'JSONKit')
-          installer = stub(:pod_targets => [pod_target])
-          installer.stubs(:pods_project).returns(pods_project)
+          installer = stub('Installer', :pod_targets => [pod_target], :pods_project => pods_project)
           Xcodeproj::XCScheme.expects(:share_scheme).with(app_project_path, 'App').once
           Xcodeproj::XCScheme.expects(:share_scheme).with(pods_project.path, 'BananaLib').once
           @validator.stubs(:shares_pod_target_xcscheme?).returns(true)
@@ -759,8 +801,7 @@ module Pod
           pod_target = fixture_pod_target('banana-lib/BananaLib.podspec')
           pod_target.stubs(:uses_swift? => true, :pod_name => 'JSONKit')
           pod_target.spec_consumers.first.stubs(:frameworks).returns(%w(XCTest))
-          installer = stub(:pod_targets => [pod_target])
-          installer.stubs(:pods_project).returns(pods_project)
+          installer = stub('Installer', :pod_targets => [pod_target], :pods_project => pods_project)
           Xcodeproj::XCScheme.expects(:share_scheme).with(app_project_path, 'App').once
           Xcodeproj::XCScheme.expects(:share_scheme).with(pods_project.path, 'BananaLib').once
           @validator.stubs(:shares_pod_target_xcscheme?).returns(true)
@@ -780,8 +821,7 @@ module Pod
           pod_target = fixture_pod_target('banana-lib/BananaLib.podspec')
           pod_target.stubs(:uses_swift? => true, :pod_name => 'JSONKit')
           pod_target.spec_consumers.first.stubs(:frameworks).returns(%w(XCTest))
-          installer = stub(:pod_targets => [pod_target])
-          installer.stubs(:pods_project).returns(pods_project)
+          installer = stub('Installer', :pod_targets => [pod_target], :pods_project => pods_project)
           Xcodeproj::XCScheme.expects(:share_scheme).with(app_project_path, 'App').once
           Xcodeproj::XCScheme.expects(:share_scheme).with(pods_project.path, 'BananaLib').never
           @validator.stubs(:shares_pod_target_xcscheme?).returns(false)
@@ -922,7 +962,7 @@ module Pod
         @validator.stubs(:check_file_patterns)
         @validator.stubs(:install_pod)
         @validator.stubs(:add_app_project_import)
-        %i(prepare resolve_dependencies download_dependencies).each do |m|
+        %i(prepare resolve_dependencies download_dependencies write_lockfiles).each do |m|
           Installer.any_instance.stubs(m)
         end
         Installer.any_instance.stubs(:aggregate_targets).returns([])
@@ -1304,10 +1344,9 @@ module Pod
           pod_target_installation_one = stub(:target => pod_target, :native_target => native_target,
                                              :test_native_targets => [], :test_specs_by_native_target => {})
           pod_target_installation_results = { 'JSONKit' => pod_target_installation_one }
-          aggregate_target = stub(:pod_targets => [pod_target])
           installer = stub(:pod_targets => [pod_target])
           validator.instance_variable_set(:@installer, installer)
-          validator.send(:configure_pod_targets, [aggregate_target], [pod_target_installation_results], '9.0')
+          validator.send(:configure_pod_targets, [pod_target_installation_results])
           debug_configuration.build_settings['SWIFT_VERSION'].should == '4.0'
         end
 
@@ -1323,10 +1362,9 @@ module Pod
           pod_target_installation_one = stub(:target => pod_target, :native_target => native_target,
                                              :test_native_targets => [], :test_specs_by_native_target => {})
           pod_target_installation_results = { 'JSONKit' => pod_target_installation_one }
-          aggregate_target = stub(:pod_targets => [pod_target])
           installer = stub(:pod_targets => [pod_target])
           validator.instance_variable_set(:@installer, installer)
-          validator.send(:configure_pod_targets, [aggregate_target], [pod_target_installation_results], '9.0')
+          validator.send(:configure_pod_targets, [pod_target_installation_results])
           debug_configuration.build_settings['SWIFT_VERSION'].should == '4.2'
         end
 
@@ -1341,10 +1379,9 @@ module Pod
           pod_target_installation_one = stub(:target => pod_target, :native_target => native_target,
                                              :test_native_targets => [], :test_specs_by_native_target => {})
           pod_target_installation_results = { 'JSONKit' => pod_target_installation_one }
-          aggregate_target = stub(:pod_targets => [pod_target])
           installer = stub(:pod_targets => [pod_target])
           validator.instance_variable_set(:@installer, installer)
-          validator.send(:configure_pod_targets, [aggregate_target], [pod_target_installation_results], '9.0')
+          validator.send(:configure_pod_targets, [pod_target_installation_results])
           debug_configuration.build_settings['SWIFT_VERSION'].should == '4.0'
         end
 
@@ -1359,10 +1396,9 @@ module Pod
           pod_target_installation_one = stub(:target => pod_target, :native_target => native_target,
                                              :test_native_targets => [], :test_specs_by_native_target => {})
           pod_target_installation_results = { 'JSONKit' => pod_target_installation_one }
-          aggregate_target = stub(:pod_targets => [pod_target])
           installer = stub(:pod_targets => [pod_target])
           validator.instance_variable_set(:@installer, installer)
-          validator.send(:configure_pod_targets, [aggregate_target], [pod_target_installation_results], '9.0')
+          validator.send(:configure_pod_targets, [pod_target_installation_results])
           debug_configuration.build_settings['SWIFT_VERSION'].should == '4.0'
         end
 
@@ -1381,18 +1417,15 @@ module Pod
                                          :test_native_targets => [test_native_target],
                                          :test_specs_by_native_target => { test_native_target => test_podspec })
           pod_target_installation_results = { 'PodTarget' => pod_target_installation }
-          aggregate_target = stub(:pod_targets => [pod_target])
           installer = stub(:pod_targets => [pod_target])
           validator.instance_variable_set(:@installer, installer)
-          validator.send(:configure_pod_targets, [aggregate_target], [pod_target_installation_results], '9.0')
+          validator.send(:configure_pod_targets, [pod_target_installation_results])
           debug_configuration.build_settings['SWIFT_VERSION'].should == '4.2'
           test_debug_configuration.build_settings['SWIFT_VERSION'].should == '4.2'
         end
 
         it 'honors the swift version set for dependencies ignoring swift version of the target being validated' do
           validator = test_swiftpod_with_swift_version_parameter('4.0')
-          consumer = stub(:platform_name => 'iOS')
-          validator.instance_variable_set(:@consumer, consumer)
           debug_configuration_one = stub(:build_settings => {})
           debug_configuration_two = stub(:build_settings => {})
           native_target_one = stub(:build_configuration_list => stub(:build_configurations => [debug_configuration_one]))
@@ -1405,18 +1438,15 @@ module Pod
           pod_target_installation_two = stub(:target => pod_target_two, :native_target => native_target_two,
                                              :test_native_targets => [], :test_specs_by_native_target => {})
           pod_target_installation_results = { 'PodTarget1' => pod_target_installation_one, 'PodTarget2' => pod_target_installation_two }
-          aggregate_target = stub(:pod_targets => [pod_target_one, pod_target_two])
           installer = stub(:pod_targets => [pod_target_one, pod_target_two])
           validator.instance_variable_set(:@installer, installer)
-          validator.send(:configure_pod_targets, [aggregate_target], [pod_target_installation_results], '9.0')
+          validator.send(:configure_pod_targets, [pod_target_installation_results])
           debug_configuration_one.build_settings['SWIFT_VERSION'].should == '4.0'
           debug_configuration_two.build_settings['SWIFT_VERSION'].should == '3.2'
         end
 
         it 'honors the swift version set for dependencies if they support it' do
           validator = test_swiftpod_with_swift_version_parameter('4.0')
-          consumer = stub(:platform_name => 'iOS')
-          validator.instance_variable_set(:@consumer, consumer)
           debug_configuration_one = stub(:build_settings => {})
           debug_configuration_two = stub(:build_settings => {})
           native_target_one = stub(:build_configuration_list => stub(:build_configurations => [debug_configuration_one]))
@@ -1429,10 +1459,9 @@ module Pod
           pod_target_installation_two = stub(:target => pod_target_two, :native_target => native_target_two,
                                              :test_native_targets => [], :test_specs_by_native_target => {})
           pod_target_installation_results = { 'PodTarget1' => pod_target_installation_one, 'PodTarget2' => pod_target_installation_two }
-          aggregate_target = stub(:pod_targets => [pod_target_one, pod_target_two])
           installer = stub(:pod_targets => [pod_target_one, pod_target_two])
           validator.instance_variable_set(:@installer, installer)
-          validator.send(:configure_pod_targets, [aggregate_target], [pod_target_installation_results], '9.0')
+          validator.send(:configure_pod_targets, [pod_target_installation_results])
           debug_configuration_one.build_settings['SWIFT_VERSION'].should == '4.0'
           debug_configuration_two.build_settings['SWIFT_VERSION'].should == '4.0'
         end

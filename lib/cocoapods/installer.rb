@@ -156,17 +156,31 @@ module Pod
       resolve_dependencies
       download_dependencies
       validate_targets
+      if installation_options.skip_pods_project_generation?
+        show_skip_pods_project_generation_message
+      else
+        integrate
+      end
+      write_lockfiles
+      perform_post_install_actions
+    end
+
+    def show_skip_pods_project_generation_message
+      UI.section 'Skipping Pods Project Creation'
+      UI.section 'Skipping User Project Integration'
+    end
+
+    def integrate
       generate_pods_project
       if installation_options.integrate_targets?
         integrate_user_project
       else
         UI.section 'Skipping User Project Integration'
       end
-      perform_post_install_actions
     end
 
     def analyze_project_cache
-      user_projects = aggregate_targets.map(&:user_project).compact
+      user_projects = aggregate_targets.map(&:user_project).compact.uniq
       object_version = user_projects.min_by { |p| p.object_version.to_i }.object_version.to_i unless user_projects.empty?
 
       if !installation_options.incremental_installation
@@ -175,13 +189,13 @@ module Pod
                                                      analysis_result.all_user_build_configurations, object_version)
       else
         UI.message 'Analyzing Project Cache' do
-          @installation_cache = ProjectCache::ProjectInstallationCache.from_file(sandbox.project_installation_cache_path)
-          @metadata_cache = ProjectCache::ProjectMetadataCache.from_file(sandbox.project_metadata_cache_path)
+          @installation_cache = ProjectCache::ProjectInstallationCache.from_file(sandbox, sandbox.project_installation_cache_path)
+          @metadata_cache = ProjectCache::ProjectMetadataCache.from_file(sandbox, sandbox.project_metadata_cache_path)
           @project_cache_version = ProjectCache::ProjectCacheVersion.from_file(sandbox.project_version_cache_path)
 
           force_clean_install = clean_install || project_cache_version.version != Version.create(VersionMetadata.project_cache_version)
           cache_result = ProjectCache::ProjectCacheAnalyzer.new(sandbox, installation_cache, analysis_result.all_user_build_configurations,
-                                                                object_version, pod_targets, aggregate_targets, :clean_install => force_clean_install).analyze
+                                                                object_version, plugins, pod_targets, aggregate_targets, :clean_install => force_clean_install).analyze
           aggregate_targets_to_generate = cache_result.aggregate_targets_to_generate || []
           pod_targets_to_generate = cache_result.pod_targets_to_generate
           (aggregate_targets_to_generate + pod_targets_to_generate).each do |target|
@@ -283,7 +297,6 @@ module Pod
       SandboxDirCleaner.new(sandbox, pod_targets, aggregate_targets).clean!
 
       update_project_cache(cache_analysis_result, target_installation_results)
-      write_lockfiles
     end
 
     def create_and_save_projects(pod_targets_to_generate, aggregate_targets_to_generate, build_configurations, project_object_version)
@@ -306,11 +319,11 @@ module Pod
         predictabilize_uuids(generated_projects) if installation_options.deterministic_uuids?
         stabilize_target_uuids(generated_projects)
 
-        run_podfile_post_install_hooks
-
         projects_writer = Xcode::PodsProjectWriter.new(sandbox, generated_projects,
                                                        target_installation_results.pod_target_installation_results, installation_options)
-        projects_writer.write!
+        projects_writer.write! do
+          run_podfile_post_install_hooks
+        end
 
         pods_project_pod_targets = pod_targets_to_generate - projects_by_pod_targets.values.flatten
         all_projects_by_pod_targets = {}
@@ -337,8 +350,7 @@ module Pod
 
     # @!group Installation results
 
-    # @return [Analyzer] the analyzer which provides the information about what
-    #         needs to be installed.
+    # @return [Analyzer::AnalysisResult] the result of the analysis performed during installation
     #
     attr_reader :analysis_result
 
@@ -496,7 +508,7 @@ module Pod
             install_source_of_pod(spec.name)
           end
         else
-          UI.titled_section("Using #{spec}", title_options) do
+          UI.section("Using #{spec}", title_options[:verbose_prefix]) do
             create_pod_installer(spec.name)
           end
         end
@@ -514,7 +526,7 @@ module Pod
         raise StandardError, message
       end
 
-      pod_installer = PodSourceInstaller.new(sandbox, specs_by_platform, :can_cache => installation_options.clean?)
+      pod_installer = PodSourceInstaller.new(sandbox, podfile, specs_by_platform, :can_cache => installation_options.clean?)
       pod_installers << pod_installer
       pod_installer
     end
@@ -574,7 +586,7 @@ module Pod
     end
 
     def validate_targets
-      validator = Xcode::TargetValidator.new(aggregate_targets, pod_targets)
+      validator = Xcode::TargetValidator.new(aggregate_targets, pod_targets, installation_options)
       validator.validate!
     end
 
@@ -740,21 +752,30 @@ module Pod
       @lockfile = generate_lockfile
 
       UI.message "- Writing Lockfile in #{UI.path config.lockfile_path}" do
+        # No need to invoke Sandbox#update_changed_file here since this logic already handles checking if the
+        # contents of the file are the same.
         @lockfile.write_to_disk(config.lockfile_path)
       end
 
       UI.message "- Writing Manifest in #{UI.path sandbox.manifest_path}" do
-        sandbox.manifest_path.open('w') do |f|
-          f.write config.lockfile_path.read
-        end
+        # No need to invoke Sandbox#update_changed_file here since this logic already handles checking if the
+        # contents of the file are the same.
+        @lockfile.write_to_disk(sandbox.manifest_path)
       end
     end
 
+    # @param [ProjectCacheAnalysisResult] cache_analysis_result
+    #        The cache analysis result for the current installation.
+    #
+    # @param [Hash{String => TargetInstallationResult}] target_installation_results
+    #        The installation results for pod targets installed.
+    #
     def update_project_cache(cache_analysis_result, target_installation_results)
       return unless installation_cache || metadata_cache
       installation_cache.update_cache_key_by_target_label!(cache_analysis_result.cache_key_by_target_label)
       installation_cache.update_project_object_version!(cache_analysis_result.project_object_version)
       installation_cache.update_build_configurations!(cache_analysis_result.build_configurations)
+      installation_cache.update_podfile_plugins!(plugins)
       installation_cache.save_as(sandbox.project_installation_cache_path)
 
       metadata_cache.update_metadata!(target_installation_results.pod_target_installation_results || {},

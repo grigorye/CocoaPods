@@ -39,10 +39,13 @@ group :development do
 
   gem 'cocoapods-dependencies', '~> 1.0.beta.1'
 
-  gem 'bacon'
+  gem 'bacon', :git => 'https://github.com/leahneukirchen/bacon.git'
+  gem 'minitest', '5.12.0' # Pinned since > 5.12.0+ drops support for Ruby 2.0
   gem 'mocha'
   gem 'mocha-on-bacon'
+  gem 'netrc'
   gem 'prettybacon'
+  gem 'typhoeus'
   gem 'webmock'
 
   # Integration tests

@@ -97,6 +97,16 @@ module Pod
       e.message.should.match(/use the `pod trunk push` command/)
     end
 
+    it 'refuses to push if the repo is CDN' do
+      Dir.chdir(test_repo_path) do
+        `rm -rf .git`
+        File.open('.url', 'w') { |f| f.write(Pod::TrunkSource::TRUNK_REPO_URL) }
+      end
+      cmd = command('repo', 'push', 'master')
+      e = lambda { cmd.run }.should.raise Pod::Informative
+      e.message.should.match(/Cannot push to a CDN source/)
+    end
+
     it 'refuses to push if the repo is not clean' do
       Dir.chdir(test_repo_path) do
         `touch DIRTY_FILE`
@@ -179,7 +189,7 @@ module Pod
     end
 
     before do
-      %i(prepare resolve_dependencies download_dependencies).each do |m|
+      %i(prepare resolve_dependencies download_dependencies write_lockfiles).each do |m|
         Installer.any_instance.stubs(m)
       end
       Installer.any_instance.stubs(:aggregate_targets).returns([])
@@ -237,6 +247,8 @@ module Pod
 
     it 'raises error and exit code when push fails' do
       cmd = command('repo', 'push', 'master')
+      Pod::TrunkSource.any_instance.stubs(:refresh_metadata)
+      cmd.instance_variable_set(:@source, Pod::TrunkSource.new(repo_path('trunk')))
       e = lambda do
         Dir.chdir(temporary_directory) { cmd.run }
       end.should.raise Informative

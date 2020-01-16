@@ -19,15 +19,13 @@ module Pod
         #
         attr_reader :platform
 
-        # @return [Target::BuildType] the build type of the target
+        # @return [BuildType] the build type of the target
         #
         attr_reader :build_type
 
-        # @return [Specification] the root specification
+        # @return [String] the Swift version of the target.
         #
-        def root_spec
-          specs.first.root
-        end
+        attr_reader :swift_version
 
         # Initialize a new instance from its attributes.
         #
@@ -35,26 +33,35 @@ module Pod
         # @param [Array<Specification>] test_specs @see #test_specs
         # @param [Array<Specification>] app_specs  @see #app_specs
         # @param [Platform] platform               @see #platform
-        # @param [Target::BuildType] build_type    @see #build_type
+        # @param [BuildType] build_type            @see #build_type
+        # @param [String] swift_version            @see #swift_version
         #
-        def initialize(specs, test_specs, app_specs, platform, build_type = Target::BuildType.static_library)
+        def initialize(specs, test_specs, app_specs, platform, build_type = BuildType.static_library,
+                       swift_version = nil)
           @specs = specs
           @test_specs = test_specs
           @app_specs = app_specs
           @platform = platform
           @build_type = build_type
-          @hash = [specs, platform, build_type].hash
+          @swift_version = swift_version
+          @hash = [specs, platform, build_type, swift_version].hash
         end
 
-        # @note Test specs are intentionally not included as part of the equality for pod variants since a
-        #       pod variant should not be affected by the number of test nor app specs included.
+        # @return [Specification] the root specification
         #
-        # @return [Bool] whether the {PodVariant} is equal to another taking all
-        #         all their attributes into account
+        def root_spec
+          specs.first.root
+        end
+
+        # @note Non library specs are intentionally not included as part of the equality for pod variants since a pod
+        #       variant should not be affected by the number of test nor app specs included.
+        #
+        # @return [Bool] whether the {PodVariant} is equal to another taking all all their attributes into account
         #
         def ==(other)
           self.class == other.class &&
           build_type == other.build_type &&
+            swift_version == other.swift_version &&
             platform == other.platform &&
             specs == other.specs
         end
@@ -66,6 +73,14 @@ module Pod
         #
         # @!visibility private
         attr_reader :hash
+
+        # @param [String] swift_version The swift version to use for this variant.
+        #
+        # @return [PodVariant] A copy of this pod variant with the specified Swift version.
+        #
+        def scoped_with_swift_version(swift_version)
+          PodVariant.new(specs, test_specs, app_specs, platform, build_type, swift_version)
+        end
       end
     end
   end

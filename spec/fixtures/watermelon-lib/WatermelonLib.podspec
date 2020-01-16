@@ -2,10 +2,10 @@ Pod::Spec.new do |s|
   s.name         = 'WatermelonLib'
   s.version      = '1.0'
   s.authors      = 'Watermelon Corp', { 'Monkey Boy' => 'monkey@watermelon-corp.local' }
-  s.homepage     = 'http://watermelon-corp.local/coconut-lib.html'
+  s.homepage     = 'http://watermelon-corp.local/watermelon-lib.html'
   s.summary      = 'Watermelons For Summer.'
   s.description  = 'All the Watermelons'
-  s.source       = { :git => 'http://watermelon-corp.local/coconut-lib.git', :tag => 'v1.0' }
+  s.source       = { :git => 'http://watermelon-corp.local/watermelon-lib.git', :tag => 'v1.0' }
   s.license      = {
     :type => 'MIT',
     :text => 'Permission is hereby granted ...',
@@ -21,6 +21,12 @@ Pod::Spec.new do |s|
     test_spec.dependency 'OCMock'
     test_spec.resources = 'App/*.txt'
     test_spec.resource_bundle = { 'WatermelonLibTestResources' => ['Tests/Resources/**/*'] }
+  end
+
+  s.test_spec 'UITests' do |test_spec|
+    test_spec.test_type = :ui
+    test_spec.requires_app_host = true
+    test_spec.source_files = 'UITests/*.{h,m}'
   end
 
   s.test_spec 'SnapshotTests' do |test_spec|
